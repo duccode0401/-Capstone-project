@@ -10,12 +10,12 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "smartcharge.settings")
 django.setup()
 from myapp.models import ChargerDevice, ChargingSession
 MQTT_BROKER = "broker.hivemq.com"
-MQTT_PORT   = 1883
-MQTT_TOPIC  = "iot/charge_station/v1/orders"
+MQTT_PORT   = 8883
+MQTT_TOPIC_STATUS = "iot/charge_station/v1/status"
 
 def on_connect(client, userdata, flags, rc):
     print("MQTT SUB connected with code", rc)
-    client.subscribe(MQTT_TOPIC)
+    client.subscribe(MQTT_TOPIC_STATUS)
 
 def on_message(client, userdata, msg):
     payload = msg.payload.decode()
@@ -55,6 +55,7 @@ def start_mqtt_sub():
     client.on_connect = on_connect
     client.on_message = on_message
 
+    client.tls_set()
     client.connect(MQTT_BROKER, MQTT_PORT, 60)
     client.loop_forever()
 

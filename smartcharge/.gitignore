@@ -1,0 +1,10 @@
+/.venv/
+__pycache__/
+*.pyc
+/web.stdout.log
+/web.stderr.log
+
+.env
+.env.*
+!.env.example
+db.sqlite3

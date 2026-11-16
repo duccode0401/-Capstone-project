@@ -1,5 +1,10 @@
 import json
 import requests
+import os
+from dotenv import load_dotenv
+from django.conf import settings
+
+load_dotenv(settings.BASE_DIR / ".env")
 
 from datetime import timedelta
 
@@ -16,7 +21,7 @@ from .models import ChargingSession, ChargerDevice, ChargerPort
 
 # ====================== MQTT CONFIG ======================
 MQTT_BROKER = "broker.hivemq.com"
-MQTT_PORT = 1883
+MQTT_PORT = 8883
 MQTT_TOPIC_ORDER = "iot/charge_station/v1/orders"
 
 # ====================== DASHBOARD CHO ADMIN ======================
@@ -120,7 +125,7 @@ def create_session_after_payment(amount_vnd: int):
 
 # ====================== PHẦN THANH TOÁN SEPAY ======================
 
-SEPAY_API_TOKEN = "UTYLIAAPN4GUWDB6B2F0F2PTWNRJR5NPWZOAEGCKZLO5MVM3HEGO88YXQBKJGNJY"
+SEPAY_API_TOKEN = os.environ.get("SEPAY_API_TOKEN", "")
 SEPAY_API_URL = "https://my.sepay.vn/userapi/transactions/list"
 
 
@@ -247,8 +252,10 @@ def check_payment(request):
                     mqtt_publish.single(
                         MQTT_TOPIC_ORDER,
                         payload,
+                        qos=1,
                         hostname=MQTT_BROKER,
                         port=MQTT_PORT,
+                        tls={},
                     )
                     print("MQTT sent:", MQTT_TOPIC_ORDER, payload)
                 except Exception as e:
