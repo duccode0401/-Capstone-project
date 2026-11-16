@@ -14,3 +14,4 @@ void charge_test_screen_set_power(float I, float V, float P);
 void charge_test_screen_set_energy(float energy_Wh, float target_Wh);
 void charge_test_screen_set_charging(int money, float target_Wh);
 void charge_test_screen_set_done(void);
+void charge_test_screen_set_wifi(bool connected);

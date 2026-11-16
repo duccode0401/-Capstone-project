@@ -1,0 +1,6 @@
+/build/
+/build-esp32/
+/managed_components/
+/sdkconfig.old
+/sdkconfig
+/.vscode/

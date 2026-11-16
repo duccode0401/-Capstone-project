@@ -12,8 +12,10 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_netif.h"
+#include "esp_crt_bundle.h"
 #include "sdkconfig.h"
 #include "mqtt_client.h"
+#include "display_lvgl.h"
 
 /* ================= DEFINE ================= */
 #define WIFI_CONNECTED_BIT BIT0
@@ -32,6 +34,7 @@ static const char *MQTT_TOPIC_ORDER =
 
 /* MQTT handle */
 static esp_mqtt_client_handle_t s_mqtt_client = NULL;
+static bool s_mqtt_started = false;
 
 /* ===== MQTT DATA BUFFER (THÊM DUY NHẤT) ===== */
 char g_mqtt_last_msg[128] = {0};
@@ -51,16 +54,25 @@ static void wifi_event_handler(void *arg,
     else if (event_base == WIFI_EVENT &&
              event_id == WIFI_EVENT_STA_DISCONNECTED) {
 
+        display_set_wifi_connected(false);
+
         if (s_retry_num < MAX_RETRY) {
-            esp_wifi_connect();
             s_retry_num++;
-            ESP_LOGW(TAG, "retry to connect AP");
-        } else {
+        }
+        if (s_retry_num == MAX_RETRY) {
             xEventGroupSetBits(
                 s_wifi_event_group,
                 WIFI_FAIL_BIT
             );
         }
+        ESP_LOGW(TAG, "WiFi disconnected; reconnecting (attempt %d)", s_retry_num);
+        esp_wifi_connect();
+    }
+    else if (event_base == WIFI_EVENT &&
+             event_id == WIFI_EVENT_STA_CONNECTED) {
+        // The station is associated with the AP; DHCP may still be pending.
+        display_set_wifi_connected(true);
+        ESP_LOGI(TAG, "Connected to access point; waiting for DHCP IP");
     }
     else if (event_base == IP_EVENT &&
              event_id == IP_EVENT_STA_GOT_IP) {
@@ -76,6 +88,9 @@ static void wifi_event_handler(void *arg,
             s_wifi_event_group,
             WIFI_CONNECTED_BIT
         );
+
+        // Start MQTT only after DHCP has provided a usable IP address.
+        mqtt_app_start();
     }
 }
 
@@ -138,19 +153,8 @@ void wifi_init_sta(void)
     );
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    EventBits_t bits =
-        xEventGroupWaitBits(
-            s_wifi_event_group,
-            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-            pdFALSE,
-            pdFALSE,
-            portMAX_DELAY);
-
-    if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "WiFi connected");
-    } else {
-        ESP_LOGE(TAG, "WiFi failed");
-    }
+    // Connect through the event handler without blocking sensor measurements.
+    ESP_LOGI(TAG, "WiFi connecting in background; sensor display remains active");
 }
 
 /* ================= MQTT EVENT HANDLER ================= */
@@ -201,13 +205,22 @@ static void mqtt_event_handler(void *handler_args,
 /* ================= MQTT START ================= */
 void mqtt_app_start(void)
 {
+    if (s_mqtt_started) {
+        return;
+    }
+
     const esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri =
-            "mqtt://broker.hivemq.com:1883",
+            "mqtts://broker.hivemq.com:8883",
+        .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
     };
 
     s_mqtt_client =
         esp_mqtt_client_init(&mqtt_cfg);
+    if (s_mqtt_client == NULL) {
+        ESP_LOGE(MQTT_TAG, "Failed to create MQTT client");
+        return;
+    }
 
     esp_mqtt_client_register_event(
         s_mqtt_client,
@@ -216,7 +229,13 @@ void mqtt_app_start(void)
         NULL
     );
 
-    esp_mqtt_client_start(s_mqtt_client);
+    esp_err_t err = esp_mqtt_client_start(s_mqtt_client);
+    if (err == ESP_OK) {
+        s_mqtt_started = true;
+        ESP_LOGI(MQTT_TAG, "MQTT client started after WiFi obtained IP");
+    } else {
+        ESP_LOGE(MQTT_TAG, "Failed to start MQTT client: %s", esp_err_to_name(err));
+    }
 }
 
 /* ================= OPTIONAL ================= */

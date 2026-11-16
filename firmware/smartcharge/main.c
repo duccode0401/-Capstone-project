@@ -7,7 +7,7 @@
 #include "wifi_mqtt.h" 
 #include "driver/gpio.h"
 
-#define CHARGE_RELAY_GPIO GPIO_NUM_15   // D15
+#define CHARGE_RELAY_GPIO GPIO_NUM_25   // D25
 
 static float energy_Wh = 0.0f;
 static float energy_target_Wh = 0.0f;
@@ -22,7 +22,7 @@ void handle_payment(const char *msg)
     int money;
 
     // msg dạng: "ESP32_001 1 10000"
-    if (sscanf(msg, "%s %d %d", dev, &port, &money) != 3) {
+    if (sscanf(msg, "%31s %d %d", dev, &port, &money) != 3 || money <= 0) {
         ESP_LOGE("PAY", "Sai dinh dang: %s", msg);
         return;
     }
@@ -35,8 +35,9 @@ void handle_payment(const char *msg)
     charging_enable = 1;
     display_show_charging(money, energy_target_Wh);
     // 🔌 BẬT SẠC
-	gpio_set_level(CHARGE_RELAY_GPIO, 0);
-	ESP_LOGI("PAY", "BAT SAC - GPIO15 = 0");
+	// Relay active-high: HIGH bat sac.
+	gpio_set_level(CHARGE_RELAY_GPIO, 1);
+	ESP_LOGI("PAY", "BAT SAC - GPIO25 = 1");
     ESP_LOGI("PAY",
              "Nhan %d VND -> muc tieu %.1f Wh",
              money, energy_target_Wh);
@@ -59,8 +60,8 @@ void update_energy(power_meter_t *m)
     if (energy_Wh >= energy_target_Wh) {
         charging_enable = 0;
         display_show_done();
-	    gpio_set_level(CHARGE_RELAY_GPIO, 1);
-	    ESP_LOGI("ENERGY", "SAC XONG - GPIO15 = 1");
+	    gpio_set_level(CHARGE_RELAY_GPIO, 0);
+	    ESP_LOGI("ENERGY", "SAC XONG - GPIO25 = 0");
         ESP_LOGI("ENERGY", "SAC XONG");
         
         // PUB DONE
@@ -70,20 +71,21 @@ void update_energy(power_meter_t *m)
 
         esp_mqtt_client_publish(
             wifi_mqtt_get_client(),
-            "iot/charge_station/v1/orders",
+            "iot/charge_station/v1/status",
             msg,
             0,
             1,
             0
         );
+        display_show_done();
     }
 }
 
 void app_main(void)
 {
     power_meter_t meter;
-    display_lvgl_init();
-    power_meter_init();
+    ESP_ERROR_CHECK(display_lvgl_init());
+    // Initialize flash storage before starting continuous ADC interrupts.
     /* ===== BẮT BUỘC PHẢI CÓ ===== */
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
@@ -91,9 +93,13 @@ void app_main(void)
         ESP_ERROR_CHECK(nvs_flash_erase());
         ESP_ERROR_CHECK(nvs_flash_init());
     }
+    else {
+        ESP_ERROR_CHECK(ret);
+    }
+
+    ESP_ERROR_CHECK(power_meter_init());
 
     wifi_init_sta();       // kết nối WiFi
-    mqtt_app_start();      // MQTT tự SUB trong event
      // ==== INIT GPIO CHARGE RELAY ====
 	// ==== INIT GPIO CHARGE RELAY ====
 	gpio_config_t io_conf = {
@@ -106,7 +112,8 @@ void app_main(void)
 	gpio_config(&io_conf);
 	
 	// Mặc định KHÔNG sạc (OFF) → xuất 1
-	gpio_set_level(CHARGE_RELAY_GPIO, 1);
+	// Relay active-high: LOW la trang thai mac dinh, khong sac.
+	gpio_set_level(CHARGE_RELAY_GPIO, 0);
 
     while (1)
     {

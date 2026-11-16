@@ -20,10 +20,17 @@
 #define ADC_BITWIDTH_USED  ADC_BITWIDTH_12
 
 /* ===== HE SO CAM BIEN ===== */
-#define DIV_RATIO   2.0f       // chia áp
-#define WCS_SENS    0.06f      // 60mV/A
-#define NUM_TURNS   4
+#define WCS_SUPPLY_V       3.3f
+#define WCS_SENS_5V_V_A    0.072f
+#define WCS_SENS_V_A       (WCS_SENS_5V_V_A * (WCS_SUPPLY_V / 5.0f))
+#define NUM_TURNS          4.0f  // Assumes the conductor passes through the sensor four times.
+#define CURRENT_NOISE_FLOOR_A 0.03f
 #define ZMPT_GAIN   170.0f
+#define ZMPT_OFFSET_V 1.65f
+#define ZMPT_AMPLIFIER_GAIN 3.3f
+// Calibrated from the new sensor reading (~5.2 V) against the reference meter
+// reading (~218.5 V): 218.5 / 5.2 ~= 42.0.
+#define ZMPT_CALIBRATION_FACTOR 42.0f
 
 /* ===== SAMPLING ===== */
 #define SAMPLE_FREQ_HZ  20000
@@ -96,12 +103,12 @@ static void adc_calibrate_zero(void)
 {
     uint8_t buf[256];
     uint32_t len;
-    float sum_i = 0, sum_v = 0;
-    int cnt_i = 0, cnt_v = 0;
+    float sum_i = 0;
+    int cnt_i = 0;
 
-    ESP_LOGI(TAG, "CALIB ZERO: DAM BAO KHONG CO DIEN & DONG");
+    ESP_LOGI(TAG, "CALIB CURRENT ZERO: ENSURE NO CURRENT THROUGH WCS1800");
 
-    while (cnt_i < RMS_SAMPLES || cnt_v < RMS_SAMPLES)
+    while (cnt_i < RMS_SAMPLES)
     {
         if (adc_continuous_read(adc_handle, buf, sizeof(buf), &len, 100) != ESP_OK)
             continue;
@@ -112,23 +119,19 @@ static void adc_calibrate_zero(void)
             int mv;
             adc_cali_raw_to_voltage(adc_cali, p->type1.data, &mv);
 
-            float v = (mv / 1000.0f) * DIV_RATIO;
+            float v = mv / 1000.0f;
 
             if (p->type1.channel == ADC_I_CH && cnt_i < RMS_SAMPLES)
             {
                 sum_i += v;
                 cnt_i++;
             }
-            else if (p->type1.channel == ADC_V_CH && cnt_v < RMS_SAMPLES)
-            {
-                sum_v += v;
-                cnt_v++;
-            }
         }
     }
 
     I_ZERO = sum_i / cnt_i;
-    V_ZERO = sum_v / cnt_v;
+    // LM358 output is biased at 1.65 V.
+    V_ZERO = ZMPT_OFFSET_V;
 
     ESP_LOGI(TAG, "ZERO DONE: I_ZERO=%.4f  V_ZERO=%.4f", I_ZERO, V_ZERO);
 }
@@ -138,7 +141,7 @@ static void adc_measure_rms(float *irms, float *vrms)
 {
     uint8_t buf[256];
     uint32_t len;
-    float sum_i2 = 0, sum_v2 = 0;
+    float sum_i2 = 0, sum_v = 0, sum_v2 = 0;
     int ci = 0, cv = 0;
 
     while (ci < RMS_SAMPLES || cv < RMS_SAMPLES)
@@ -152,17 +155,20 @@ static void adc_measure_rms(float *irms, float *vrms)
             int mv;
             adc_cali_raw_to_voltage(adc_cali, p->type1.data, &mv);
 
-            float v = (mv / 1000.0f) * DIV_RATIO;
+            float v = mv / 1000.0f;
 
             if (p->type1.channel == ADC_I_CH && ci < RMS_SAMPLES)
             {
-                float i_inst = (v - I_ZERO) / (WCS_SENS * NUM_TURNS);
+                float i_inst = (v - I_ZERO) / (WCS_SENS_V_A * NUM_TURNS);
                 sum_i2 += i_inst * i_inst;
                 ci++;
             }
             else if (p->type1.channel == ADC_V_CH && cv < RMS_SAMPLES)
             {
-                float vv = v - V_ZERO;
+                // Remove the LM358 bias from each ADC sample before RMS.
+                float v_adc = mv / 1000.0f;
+                float vv = v_adc - V_ZERO;
+                sum_v += vv;
                 sum_v2 += vv * vv;
                 cv++;
             }
@@ -170,7 +176,20 @@ static void adc_measure_rms(float *irms, float *vrms)
     }
 
     *irms = sqrtf(sum_i2 / RMS_SAMPLES);
-    *vrms = sqrtf(sum_v2 / RMS_SAMPLES) * ZMPT_GAIN;
+    // Suppress the small apparent current caused by ADC noise near zero.
+    if (*irms < CURRENT_NOISE_FLOOR_A) {
+        *irms = 0.0f;
+    }
+    // Remove any residual DC bias error around the nominal 1.65 V offset.
+    // Variance computes AC RMS even if the real bias drifts slightly.
+    float mean_v = sum_v / RMS_SAMPLES;
+    float ac_mean_square = (sum_v2 / RMS_SAMPLES) - (mean_v * mean_v);
+    if (ac_mean_square < 0.0f) {
+        ac_mean_square = 0.0f;
+    }
+    float amplifier_output_rms = sqrtf(ac_mean_square);
+    *vrms = (amplifier_output_rms / ZMPT_AMPLIFIER_GAIN) *
+            ZMPT_GAIN * ZMPT_CALIBRATION_FACTOR;
 }
 
 /* ========================================================= */

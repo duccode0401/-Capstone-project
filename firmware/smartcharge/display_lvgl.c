@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "driver/spi_master.h"
 #include "esp_check.h"
 #include "esp_lcd_ili9341.h"
@@ -25,6 +26,12 @@
 #define PIN_NUM_MISO 19
 #define PIN_NUM_LCD_CS 5
 #define PIN_NUM_BKL 4
+#define LCD_BKL_LEDC_MODE LEDC_LOW_SPEED_MODE
+#define LCD_BKL_LEDC_CHANNEL LEDC_CHANNEL_0
+#define LCD_BKL_LEDC_TIMER LEDC_TIMER_0
+#define LCD_BKL_PWM_RESOLUTION LEDC_TIMER_10_BIT
+#define LCD_BKL_PWM_FREQUENCY_HZ 5000
+#define LCD_BKL_BRIGHTNESS_PERCENT 75
 #define PIN_NUM_RST 22
 #define PIN_NUM_LCD_DC 21
 
@@ -47,8 +54,26 @@ static void lvgl_tick(void *arg);
 
 static void display_init(void)
 {
-    gpio_set_direction(PIN_NUM_BKL, GPIO_MODE_OUTPUT);
-    gpio_set_level(PIN_NUM_BKL, 1);
+    // GPIO4 drives the TFT backlight. PWM lets us dim it in software.
+    const ledc_timer_config_t backlight_timer = {
+        .speed_mode = LCD_BKL_LEDC_MODE,
+        .duty_resolution = LCD_BKL_PWM_RESOLUTION,
+        .timer_num = LCD_BKL_LEDC_TIMER,
+        .freq_hz = LCD_BKL_PWM_FREQUENCY_HZ,
+        .clk_cfg = LEDC_AUTO_CLK,
+    };
+    ESP_ERROR_CHECK(ledc_timer_config(&backlight_timer));
+
+    const ledc_channel_config_t backlight_channel = {
+        .gpio_num = PIN_NUM_BKL,
+        .speed_mode = LCD_BKL_LEDC_MODE,
+        .channel = LCD_BKL_LEDC_CHANNEL,
+        .intr_type = LEDC_INTR_DISABLE,
+        .timer_sel = LCD_BKL_LEDC_TIMER,
+        .duty = (1023 * LCD_BKL_BRIGHTNESS_PERCENT) / 100,
+        .hpoint = 0,
+    };
+    ESP_ERROR_CHECK(ledc_channel_config(&backlight_channel));
 
     spi_bus_config_t buscfg = {
         .sclk_io_num = PIN_NUM_SCLK,
@@ -144,7 +169,9 @@ static void lvgl_task(void *arg)
         _lock_acquire(&lvgl_api_lock);
         wait_ms = lv_timer_handler();
         _lock_release(&lvgl_api_lock);
-        vTaskDelay(pdMS_TO_TICKS(MAX(wait_ms, 10)));
+        // LV_NO_TIMER_READY may be UINT32_MAX. Poll regularly so changes
+        // made by the measurement task are rendered even without UI timers.
+        vTaskDelay(pdMS_TO_TICKS(MIN(MAX(wait_ms, 10), 50)));
     }
 }
 
@@ -180,18 +207,24 @@ esp_err_t display_lvgl_init(void)
     charge_test_screen_create();
     _lock_release(&lvgl_api_lock);
 
-    xTaskCreate(lvgl_task, "lvgl", 4096, NULL, 2, NULL);
+    // Screen construction and rendering use large LVGL call stacks; reserve
+    // enough stack for font measurement and widget style setup.
+    xTaskCreate(lvgl_task, "lvgl", 8192, NULL, 2, NULL);
     return ESP_OK;
 }
 
 void display_update_power(float I, float V, float P)
 {
+    _lock_acquire(&lvgl_api_lock);
     charge_test_screen_set_power(I, V, P);
+    _lock_release(&lvgl_api_lock);
 }
 
 void display_update_energy(float energy_Wh, float target_Wh)
 {
+    _lock_acquire(&lvgl_api_lock);
     charge_test_screen_set_energy(energy_Wh, target_Wh);
+    _lock_release(&lvgl_api_lock);
 }
 
 void display_show_payment(void)
@@ -212,5 +245,12 @@ void display_show_done(void)
 {
     _lock_acquire(&lvgl_api_lock);
     charge_test_screen_set_done();
+    _lock_release(&lvgl_api_lock);
+}
+
+void display_set_wifi_connected(bool connected)
+{
+    _lock_acquire(&lvgl_api_lock);
+    charge_test_screen_set_wifi(connected);
     _lock_release(&lvgl_api_lock);
 }
