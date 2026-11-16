@@ -1,0 +1,15 @@
+{% load static %}
+<!doctype html>
+<html lang="vi"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SmartCharge Device Logs</title><link rel="stylesheet" href="{% static 'css/monitoring.css' %}">
+</head><body><main class="shell">
+  <div class="topbar"><div><h1>ESP32 Logs</h1><p class="muted">Log mới nhất từ MQTT, phân trang 50 dòng.</p></div><nav class="nav"><a href="{% url 'myapp:devices_dashboard' %}">Monitoring</a><a href="{% url 'admin:index' %}">Admin</a></nav></div>
+  <form class="filters" method="get">
+    <select name="device"><option value="">Tất cả thiết bị</option>{% for d in devices %}<option value="{{ d.device_id }}" {% if selected_device == d.device_id %}selected{% endif %}>{{ d.device_id }}</option>{% endfor %}</select>
+    {% for f in filters %}<a class="{% if selected_filter == f %}active{% endif %}" href="?device={{ selected_device|urlencode }}&filter={{ f }}">{{ f }}</a>{% endfor %}
+  </form>
+  <table><thead><tr><th>Time</th><th>Device</th><th>Level</th><th>Event</th><th>Message</th><th>Uptime</th></tr></thead>
+  <tbody>{% for log in page %}<tr><td>{{ log.received_at }}</td><td>{{ log.device.device_id }}</td><td class="level-{{ log.level }}">{{ log.level }}</td><td>{{ log.event }}</td><td>{{ log.message }}</td><td>{{ log.uptime_ms|default_if_none:"—" }}</td></tr>{% empty %}<tr><td colspan="6">Không có log.</td></tr>{% endfor %}</tbody></table>
+  <div class="pagination">{% if page.has_previous %}<a href="?device={{ selected_device|urlencode }}&filter={{ selected_filter }}&page={{ page.previous_page_number }}">← Trước</a>{% endif %}<span>Trang {{ page.number }}/{{ page.paginator.num_pages }}</span>{% if page.has_next %}<a href="?device={{ selected_device|urlencode }}&filter={{ selected_filter }}&page={{ page.next_page_number }}">Sau →</a>{% endif %}</div>
+</main>{% if page.number == 1 %}<script>setTimeout(() => location.reload(), 5000);</script>{% endif %}</body></html>

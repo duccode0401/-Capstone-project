@@ -119,6 +119,25 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = 'static/'
+MEDIA_ROOT = BASE_DIR / "media-private"
+
+# OTA/monitoring. Firmware URLs are generated only from this trusted HTTPS base.
+FIRMWARE_HTTPS_BASE_URL = os.environ.get("FIRMWARE_HTTPS_BASE_URL", "").rstrip("/")
+OTA_DEVICE_KEYS_JSON = os.environ.get("OTA_DEVICE_KEYS_JSON", "{}")
+OTA_DOWNLOAD_TTL_SECONDS = int(os.environ.get("OTA_DOWNLOAD_TTL_SECONDS", "7200"))
+OTA_STATUS_TIMEOUT_SECONDS = int(os.environ.get("OTA_STATUS_TIMEOUT_SECONDS", "300"))
+DEVICE_STALE_SECONDS = int(os.environ.get("DEVICE_STALE_SECONDS", "30"))
+TELEMETRY_RETENTION_PER_DEVICE = int(
+    os.environ.get("TELEMETRY_RETENTION_PER_DEVICE", "10000")
+)
+DEVICE_LOG_RETENTION_PER_DEVICE = int(
+    os.environ.get("DEVICE_LOG_RETENTION_PER_DEVICE", "5000")
+)
+
+MQTT_BROKER = os.environ.get("MQTT_BROKER", "broker.hivemq.com")
+MQTT_PORT = int(os.environ.get("MQTT_PORT", "8883"))
+MQTT_USERNAME = os.environ.get("MQTT_USERNAME", "")
+MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", "")
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field

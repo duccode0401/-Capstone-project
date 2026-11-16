@@ -1,6 +1,9 @@
 import json
 import requests
 import os
+import time
+import re
+from datetime import timedelta
 from dotenv import load_dotenv
 from django.conf import settings
 
@@ -8,16 +11,27 @@ load_dotenv(settings.BASE_DIR / ".env")
 
 from datetime import timedelta
 
-from django.http import JsonResponse
+from django.http import FileResponse, JsonResponse, StreamingHttpResponse
 from django.shortcuts import render
+from django.core.exceptions import PermissionDenied
+from django.core.paginator import Paginator
+from django.contrib.auth.decorators import permission_required
 from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_GET
 from django.contrib.admin.views.decorators import staff_member_required
-from django.db import transaction
+from django.db import OperationalError, transaction
 from django.utils import timezone
 
 import paho.mqtt.publish as mqtt_publish  # <--- THÊM DÒNG NÀY
 
-from .models import ChargingSession, ChargerDevice, ChargerPort
+from .models import (
+    ChargingSession,
+    ChargerDevice,
+    ChargerPort,
+    DeviceLog,
+    DeviceTelemetry,
+)
+from .ota_services import authorize_job_token, build_manifest
 
 # ====================== MQTT CONFIG ======================
 MQTT_BROKER = "broker.hivemq.com"
@@ -82,6 +96,17 @@ def assign_session_to_free_slot(session: ChargingSession):
     Trả về session đã gán, hoặc None nếu hết chỗ.
     """
     with transaction.atomic():
+        session = (
+            ChargingSession.objects.select_for_update()
+            .select_related("device")
+            .get(pk=session.pk)
+        )
+
+        if session.status in ACTIVE_STATUSES:
+            return session
+        if session.status == "done":
+            return None
+
         ports = (
             ChargerPort.objects
             .select_for_update()
@@ -99,28 +124,101 @@ def assign_session_to_free_slot(session: ChargingSession):
             if not has_active:
                 session.device = port.device
                 session.port_no = port.port_no
-                session.status = "assigned"   # Đã gán trạm/cổng
-                session.save()
+                session.status = "assigned"
+                session.save(update_fields=["device", "port_no", "status", "updated_at"])
                 return session
 
         # không slot nào trống
         session.status = "waiting"
-        session.save()
+        session.device = None
+        session.port_no = None
+        session.save(update_fields=["device", "port_no", "status", "updated_at"])
         return None
 
 
-def create_session_after_payment(amount_vnd: int):
+def create_session_after_payment(amount_vnd: int, sepay_transaction_id):
     """
     Khi thanh toán thành công, gọi hàm này.
     Nó tạo ChargingSession + auto gán vào slot trống (nếu có).
     """
-    session = ChargingSession.objects.create(
-        amount_vnd=amount_vnd,
-        status="paid",   # tạm: vừa thanh toán xong
-    )
-    assigned = assign_session_to_free_slot(session)
-    # Nếu gán được thì trả session đã gán, không thì trả session 'waiting'
-    return assigned or session
+    transaction_id = str(sepay_transaction_id).strip()
+    if not transaction_id:
+        raise ValueError("SePay transaction ID is required")
+
+    # Unique constraint là lớp bảo vệ cuối cùng nếu hai request đồng thời cùng xử lý.
+    # SQLite khóa cả table khi ghi, nên retry ngắn thay vì trả 500 cho polling còn lại.
+    for attempt in range(5):
+        try:
+            with transaction.atomic():
+                session, _created = ChargingSession.objects.get_or_create(
+                    sepay_transaction_id=transaction_id,
+                    defaults={"amount_vnd": amount_vnd, "status": "paid"},
+                )
+            break
+        except OperationalError as exc:
+            if "locked" not in str(exc).lower() or attempt == 4:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+    for attempt in range(5):
+        try:
+            assigned = assign_session_to_free_slot(session)
+            break
+        except OperationalError as exc:
+            if "locked" not in str(exc).lower() or attempt == 4:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+    if assigned is None:
+        session.refresh_from_db()
+    else:
+        session = assigned
+    return session
+
+
+def publish_start_once(session: ChargingSession):
+    """Gửi START tối đa một lần sau khi session đã được gán hợp lệ."""
+    with transaction.atomic():
+        session = (
+            ChargingSession.objects.select_related("device").get(pk=session.pk)
+        )
+        if session.mqtt_start_sent_at is not None:
+            return False
+        if (
+            session.status not in ACTIVE_STATUSES
+            or session.device_id is None
+            or session.port_no is None
+        ):
+            return False
+
+        # Compare-and-set này chặn hai worker cùng claim một lệnh START, kể cả
+        # trên SQLite nơi select_for_update() không khóa row như PostgreSQL.
+        claimed_at = timezone.now()
+        claimed = ChargingSession.objects.filter(
+            pk=session.pk, mqtt_start_sent_at__isnull=True
+        ).update(mqtt_start_sent_at=claimed_at, updated_at=claimed_at)
+        if claimed != 1:
+            return False
+
+    payload = f"{session.device.device_id} {session.port_no} {session.amount_vnd}"
+    try:
+        mqtt_publish.single(
+            MQTT_TOPIC_ORDER,
+            payload,
+            qos=1,
+            hostname=MQTT_BROKER,
+            port=MQTT_PORT,
+            tls={},
+        )
+    except Exception:
+        # Cho phép retry nếu broker xác nhận publish thất bại. Nếu process chết
+        # giữa publish và phản hồi thì giao thức hiện tại không thể đảm bảo exactly-once.
+        ChargingSession.objects.filter(
+            pk=session.pk, mqtt_start_sent_at=claimed_at
+        ).update(mqtt_start_sent_at=None)
+        raise
+
+    print("MQTT START sent:", MQTT_TOPIC_ORDER, payload)
+    return True
 
 
 # ====================== PHẦN THANH TOÁN SEPAY ======================
@@ -223,45 +321,34 @@ def check_payment(request):
     session_info = None
 
     if paid:
-        # MỖI lần detect có giao dịch mới => tạo 1 session riêng
-        session = create_session_after_payment(amount)
+        processed_sessions = []
+        for sepay_transaction in txs:
+            transaction_id = sepay_transaction.get("id")
+            if transaction_id is None:
+                print("SePay transaction is missing id; skipped")
+                continue
 
-        if session is None:
-            # Chưa có => tạo mới + gán slot trống
-            session = create_session_after_payment(amount)
+            session = create_session_after_payment(amount, transaction_id)
+            try:
+                publish_start_once(session)
+            except Exception as e:
+                # Session vẫn tồn tại và lần polling sau có thể retry START an toàn.
+                print(f"MQTT START publish failed for session {session.id}: {e}")
+            processed_sessions.append(session)
 
-        if session is not None:
-            session_info = {
-                "id": session.id,
-                "device_id": session.device.device_id if session.device else None,
-                "port_no": session.port_no,
-                "status": session.status,
-            }
-                        # ================== GỬI MQTT TẠI ĐÂY ==================
-            # Chỉ gửi nếu đã có device + port
-            if session.device and session.port_no is not None:
-                device_id = session.device.device_id
-                port_no = session.port_no
-                # amount là số VND, mình ép int luôn cho gọn
-                money = int(amount)
+        if not processed_sessions:
+            return JsonResponse(
+                {"ok": False, "error": "sepay_transaction_missing_id"}, status=502
+            )
 
-                # Format đúng yêu cầu: "deviceID port tiền"
-                payload = f"{device_id} {port_no} {money}"
-
-                try:
-                    mqtt_publish.single(
-                        MQTT_TOPIC_ORDER,
-                        payload,
-                        qos=1,
-                        hostname=MQTT_BROKER,
-                        port=MQTT_PORT,
-                        tls={},
-                    )
-                    print("MQTT sent:", MQTT_TOPIC_ORDER, payload)
-                except Exception as e:
-                    # Không để lỗi MQTT làm hỏng API trả về cho frontend
-                    print("MQTT publish error:", e)
-            # ======================================================
+        session = processed_sessions[0]
+        session.refresh_from_db()
+        session_info = {
+            "id": session.id,
+            "device_id": session.device.device_id if session.device else None,
+            "port_no": session.port_no,
+            "status": session.status,
+        }
     return JsonResponse(
         {
             "ok": True,
@@ -270,3 +357,174 @@ def check_payment(request):
             "session": session_info,
         }
     )
+
+
+def _staff_permission(permission):
+    def decorator(view):
+        return staff_member_required(permission_required(permission, raise_exception=True)(view))
+    return decorator
+
+
+def _device_snapshot(device, now):
+    telemetry = (
+        DeviceTelemetry.objects.filter(device=device)
+        .order_by("-received_at")
+        .first()
+    )
+    stale = (
+        not device.last_seen_at
+        or device.last_seen_at
+        < now - timedelta(seconds=settings.DEVICE_STALE_SECONDS)
+    )
+    return {
+        "device_id": device.device_id,
+        "name": device.name,
+        "online": not stale,
+        "firmware_version": device.firmware_version or "—",
+        "port": telemetry.port if telemetry else None,
+        "voltage_v": telemetry.voltage_v if telemetry else None,
+        "current_a": telemetry.current_a if telemetry else None,
+        "power_w": telemetry.power_w if telemetry else None,
+        "energy_total_wh": telemetry.energy_total_wh if telemetry else None,
+        "energy_delta_wh": telemetry.energy_delta_wh if telemetry else None,
+        "charging_status": telemetry.charging_status if telemetry else "UNKNOWN",
+        "last_update": telemetry.received_at if telemetry else device.last_seen_at,
+    }
+
+
+@_staff_permission("myapp.view_devicetelemetry")
+def devices_dashboard(request):
+    now = timezone.now()
+    devices = [_device_snapshot(device, now) for device in ChargerDevice.objects.all()]
+    return render(request, "myapp/device_dashboard.html", {"devices": devices})
+
+
+@_staff_permission("myapp.view_devicelog")
+def device_logs_dashboard(request):
+    queryset = DeviceLog.objects.select_related("device")
+    selected_device = request.GET.get("device", "")
+    selected_filter = request.GET.get("filter", "ALL").upper()
+    if selected_device:
+        queryset = queryset.filter(device__device_id=selected_device)
+    if selected_filter in {"INFO", "WARNING", "ERROR"}:
+        queryset = queryset.filter(level=selected_filter)
+    elif selected_filter == "OTA":
+        queryset = queryset.filter(event__startswith="OTA_")
+    elif selected_filter == "CHARGING":
+        queryset = queryset.filter(
+            event__in=[
+                "PAYMENT_RECEIVED", "CHARGING_STARTED", "CHARGE_COMPLETED",
+                "RELAY_ON", "RELAY_OFF",
+            ]
+        )
+    elif selected_filter != "ALL":
+        selected_filter = "ALL"
+    page = Paginator(queryset, 50).get_page(request.GET.get("page"))
+    return render(
+        request,
+        "myapp/device_logs.html",
+        {
+            "page": page,
+            "devices": ChargerDevice.objects.order_by("device_id"),
+            "selected_device": selected_device,
+            "selected_filter": selected_filter,
+            "filters": ["ALL", "INFO", "WARNING", "ERROR", "OTA", "CHARGING"],
+        },
+    )
+
+
+@require_GET
+@_staff_permission("myapp.view_devicetelemetry")
+def device_status_api(request):
+    now = timezone.now()
+    payload = []
+    for device in ChargerDevice.objects.all():
+        item = _device_snapshot(device, now)
+        item["last_update"] = (
+            item["last_update"].isoformat() if item["last_update"] else None
+        )
+        payload.append(item)
+    return JsonResponse({"devices": payload, "server_time": now.isoformat()})
+
+
+@require_GET
+@_staff_permission("myapp.view_devicelog")
+def recent_logs_api(request):
+    queryset = DeviceLog.objects.select_related("device")
+    device_id = request.GET.get("device")
+    if device_id:
+        queryset = queryset.filter(device__device_id=device_id)
+    logs = [
+        {
+            "device": log.device.device_id,
+            "level": log.level,
+            "event": log.event,
+            "message": log.message,
+            "uptime_ms": log.uptime_ms,
+            "received_at": log.received_at.isoformat(),
+        }
+        for log in queryset[:100]
+    ]
+    return JsonResponse({"logs": logs})
+
+
+@require_GET
+def firmware_manifest(request, request_id, token):
+    job = authorize_job_token(request_id, token)
+    response = JsonResponse(build_manifest(job, token))
+    response["Cache-Control"] = "no-store"
+    response["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+def _range_iterator(file_handle, start, length, block_size=64 * 1024):
+    try:
+        file_handle.seek(start)
+        remaining = length
+        while remaining > 0:
+            chunk = file_handle.read(min(block_size, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+    finally:
+        file_handle.close()
+
+
+@require_GET
+def firmware_download(request, request_id, token):
+    job = authorize_job_token(request_id, token)
+    firmware = job.firmware
+    file_handle = firmware.file.open("rb")
+    range_header = request.headers.get("Range", "")
+    match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_header)
+    if range_header and not match:
+        file_handle.close()
+        return StreamingHttpResponse(status=416)
+    if match:
+        start = int(match.group(1))
+        end = int(match.group(2)) if match.group(2) else firmware.file_size - 1
+        if start >= firmware.file_size or end < start:
+            file_handle.close()
+            response = StreamingHttpResponse(status=416)
+            response["Content-Range"] = f"bytes */{firmware.file_size}"
+            return response
+        end = min(end, firmware.file_size - 1)
+        length = end - start + 1
+        response = StreamingHttpResponse(
+            _range_iterator(file_handle, start, length),
+            status=206,
+            content_type="application/octet-stream",
+        )
+        response["Content-Range"] = f"bytes {start}-{end}/{firmware.file_size}"
+        response["Content-Length"] = str(length)
+    else:
+        response = FileResponse(file_handle, content_type="application/octet-stream")
+        response["Content-Length"] = str(firmware.file_size)
+    response["Content-Disposition"] = (
+        f'attachment; filename="smartcharge-{firmware.version}.bin"'
+    )
+    response["Accept-Ranges"] = "bytes"
+    response["Cache-Control"] = "private, no-store"
+    response["X-Content-Type-Options"] = "nosniff"
+    return response
