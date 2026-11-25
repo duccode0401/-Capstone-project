@@ -14,6 +14,7 @@ from pathlib import Path
 import os
 from urllib.parse import urlsplit
 from dotenv import load_dotenv
+from django.core.management.utils import get_random_secret_key
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -24,10 +25,10 @@ load_dotenv(BASE_DIR / ".env")
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "django-insecure-local-development-only")
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY") or get_random_secret_key()
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get("DJANGO_DEBUG", "").strip().lower() == "true"
 
 FIRMWARE_HTTPS_BASE_URL = os.environ.get("FIRMWARE_HTTPS_BASE_URL", "").rstrip("/")
 OTA_PUBLIC_HOST = urlsplit(FIRMWARE_HTTPS_BASE_URL).hostname
@@ -85,6 +86,7 @@ WSGI_APPLICATION = 'smartcharge.wsgi.application'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
 MQTT_PUBLIC_TEST_MODE = os.environ.get("MQTT_PUBLIC_TEST_MODE", "").strip().lower() == "true"
+MQTT_DEVICE_ID = "ESP32_001"
 MQTT_PUBLIC_TEST_DEVICE = os.environ.get("MQTT_PUBLIC_TEST_DEVICE", "").strip()
 
 DATABASES = {
@@ -144,10 +146,13 @@ DEVICE_LOG_RETENTION_PER_DEVICE = int(
     os.environ.get("DEVICE_LOG_RETENTION_PER_DEVICE", "5000")
 )
 
-MQTT_BROKER = os.environ.get("MQTT_BROKER", "")
+MQTT_BROKER = os.environ.get("MQTT_BROKER", "broker.emqx.io")
 MQTT_PORT = int(os.environ.get("MQTT_PORT", "8883"))
 MQTT_USERNAME = os.environ.get("MQTT_USERNAME", "")
 MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", "")
+SEPAY_WEBHOOK_API_KEY = os.environ.get("SEPAY_WEBHOOK_API_KEY", "")
+SEPAY_ACCOUNT_NUMBER = os.environ.get("SEPAY_ACCOUNT_NUMBER", "")
+SEPAY_BANK = os.environ.get("SEPAY_BANK", "")
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field

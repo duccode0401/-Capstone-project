@@ -3,6 +3,8 @@
 Để xem telemetry và log từ ESP32 trên bàn test mà không cần tài khoản MQTT,
 dùng [chế độ EMQX công cộng](../firmware%201.0/PUBLIC_MQTT_TEST.md).
 
+[Ch?y Web v? subscriber b?ng PowerShell, c?u h?nh SePay v? h?p ??ng Firmware](WEB_MQTT_OTA.md)
+
 ## Khởi động
 
 Tạo môi trường và cài dependency (chỉ cần làm lần đầu):

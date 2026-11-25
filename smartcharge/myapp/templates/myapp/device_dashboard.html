@@ -21,6 +21,9 @@
         <div class="metric"><span>Power</span><strong data-key="power_w">{{ d.power_w|default_if_none:"—" }}</strong> W</div>
         <div class="metric"><span>Total energy</span><strong data-key="energy_total_wh">{{ d.energy_total_wh|default_if_none:"—" }}</strong> Wh</div>
         <div class="metric"><span>10s energy</span><strong data-key="energy_delta_wh">{{ d.energy_delta_wh|default_if_none:"—" }}</strong> Wh</div>
+        <div class="metric"><span>Free heap</span><strong data-key="heap_free_bytes">{{ d.heap_free_bytes|default_if_none:"—" }}</strong> B</div>
+        <div class="metric"><span>RSSI</span><strong data-key="rssi_dbm">{{ d.rssi_dbm|default_if_none:"—" }}</strong> dBm</div>
+        <div class="metric"><span>Reported firmware</span><strong data-key="reported_firmware_version">{{ d.reported_firmware_version|default:"—" }}</strong></div>
         <div class="metric"><span>State</span><strong data-key="charging_status">{{ d.charging_status }}</strong></div>
       </div>
       <p class="muted">Last seen: <span data-key="last_update">{{ d.last_update|default:"—" }}</span></p>
@@ -41,8 +44,8 @@ async function refreshDevices() {
       badge.textContent = d.online ? 'ONLINE' : 'OFFLINE';
       badge.className = `badge ${d.online ? 'online' : 'offline'}`;
       card.querySelector('.firmware').textContent = `FW ${d.firmware_version}`;
-      ['voltage_v','current_a','power_w','energy_total_wh','energy_delta_wh','charging_status'].forEach(k => {
-        card.querySelector(`[data-key="${k}"]`).textContent = d[k] ?? '—';
+      ['voltage_v','current_a','power_w','energy_total_wh','energy_delta_wh','charging_status','heap_free_bytes','rssi_dbm','reported_firmware_version'].forEach(k => {
+        card.querySelector(`[data-key="${k}"]`).textContent = d[k] === '' ? '—' : (d[k] ?? '—');
       });
       card.querySelector('[data-key="last_update"]').textContent = d.last_update ? new Date(d.last_update).toLocaleString() : '—';
     });

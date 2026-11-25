@@ -300,6 +300,8 @@ STATUS_ORDER = {
 
 
 def process_ota_status(data):
+    if settings.MQTT_PUBLIC_TEST_MODE:
+        raise ValidationError("Unsigned OTA status requires authenticated broker ACLs.")
     required = {"device", "request_id", "status", "progress", "version"}
     if not isinstance(data, dict) or not required.issubset(data):
         raise ValidationError("OTA status thiếu trường bắt buộc.")
