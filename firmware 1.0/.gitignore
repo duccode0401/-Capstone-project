@@ -10,3 +10,5 @@
 /recovery/sdkconfig.recovery*
 /provisioning/
 __pycache__/
+/build-host/
+*.log

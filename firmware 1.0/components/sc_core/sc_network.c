@@ -61,12 +61,17 @@ void sc_log(const char *level,const char *event,const char *message)
 }
 void sc_status(const sc_request_t *r,const char *status,int progress)
 {
+    sc_status_error(r,status,progress,NULL);
+}
+void sc_status_error(const sc_request_t *r,const char *status,int progress,const char *error)
+{
     cJSON *j=cJSON_CreateObject(); if(!j) return;
     cJSON_AddStringToObject(j,"device",sc_config.device);
     cJSON_AddStringToObject(j,"request_id",r?r->request_id:"");
     cJSON_AddStringToObject(j,"version",r?r->version:"");
     cJSON_AddStringToObject(j,"status",status);
     cJSON_AddNumberToObject(j,"progress",progress);
+    if(error) cJSON_AddStringToObject(j,"error",error);
     char json[512];
     if(cJSON_PrintPreallocated(j,json,sizeof(json),false)) sc_publish(SC_BASE "ota/status",json,true);
     cJSON_Delete(j);

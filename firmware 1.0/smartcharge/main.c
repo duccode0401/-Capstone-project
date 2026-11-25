@@ -113,6 +113,9 @@ static void ota_command(const char *json)
     sc_request_t r;
     esp_err_t e=sc_parse_request(json,&r);
     if(e!=ESP_OK) { sc_log("WARN","OTA_REJECTED","Invalid, unauthorized or disabled OTA command"); return; }
+    /* QoS1 duplicates must not turn an already accepted backend job into FAILED/BUSY. */
+    e=sc_check_request(&r);
+    if(e!=ESP_OK) { sc_log("WARN","OTA_REJECTED","Replay, duplicate or incompatible version ignored"); return; }
     if(charging_enable || gpio_get_level(CHARGE_RELAY_GPIO) || ota_locked || !healthy) {
         sc_status(&r,"REJECTED_BUSY",0);
         sc_log("WARN","OTA_REJECTED","Charging or startup active"); return;

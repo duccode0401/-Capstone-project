@@ -80,14 +80,59 @@ bool sc_trusted_url(const char *url)
     size_t n=strlen(sc_config.trust_base);
     if (n<10 || strncmp(sc_config.trust_base,"https://",8) || sc_config.trust_base[n-1]!='/') return false;
     if (strncmp(url,sc_config.trust_base,n) || strlen(url)>=384) return false;
+    /* Reject malformed URLs before passing them to SDK diagnostics, which may
+     * print a bad URL. Capability tokens must never reach such parse-error logs. */
+    for(const unsigned char *p=(const unsigned char *)url;*p;p++)
+        if(!((*p>='a' && *p<='z') || (*p>='A' && *p<='Z') || (*p>='0' && *p<='9') ||
+             *p=='-' || *p=='_' || *p=='.' || *p=='~' || *p==':' || *p=='/')) return false;
+    const char *authority=sc_config.trust_base+8,*slash=strchr(authority,'/');
+    if(!slash || slash==authority) return false;
+    const char *colon=memchr(authority,':',(size_t)(slash-authority));
+    const char *host_end=colon?colon:slash;
+    if(host_end==authority) return false;
+    for(const char *p=authority;p<host_end;p++)
+        if(!isalnum((unsigned char)*p) && *p!='.' && *p!='-') return false;
+    if(colon) {
+        if(slash-colon<=1 || slash-colon>6) return false;
+        unsigned port=0;
+        for(const char *p=colon+1;p<slash;p++) {
+            if(*p<'0' || *p>'9') return false;
+            port=port*10+(unsigned)(*p-'0');
+        }
+        if(!port || port>65535) return false;
+    }
     /* Fixed trusted prefix, no userinfo, query credentials, redirects or escapes. */
     return strpbrk(url,"\r\n\t @?#%\\") == NULL && strstr(url+8,"..") == NULL;
+}
+bool sc_private_broker(const char *uri)
+{
+    if(strncmp(uri,"mqtts://",8)) return false;
+    const char *start=uri+8,*colon=strchr(start,':');
+    size_t length=colon?(size_t)(colon-start):strlen(start);
+    if(!length || length>=192 || strpbrk(start,"\r\n\t @?#/\\")) return false;
+    char host[192];
+    for(size_t i=0;i<length;i++) {
+        unsigned char c=start[i];
+        if(!isalnum(c) && c!='.' && c!='-') return false;
+        host[i]=(char)tolower(c);
+    }
+    while(length && host[length-1]=='.') length--;
+    host[length]=0;
+    const char *public_host="broker.hivemq.com";
+    size_t public_len=strlen(public_host);
+    if(!length || !strcmp(host,public_host) || (length>public_len &&
+        host[length-public_len-1]=='.' && !strcmp(host+length-public_len,public_host))) return false;
+    if(colon) {
+        if(!colon[1] || strspn(colon+1,"0123456789")!=strlen(colon+1) || strlen(colon+1)>5) return false;
+        unsigned long port=strtoul(colon+1,NULL,10);
+        if(!port || port>65535) return false;
+    }
+    return true;
 }
 bool sc_ota_enabled(void)
 {
     return storage_ready && strlen(sc_config.key_hex)==64 &&
-           !strncmp(sc_config.broker,"mqtts://",8) &&
-           strstr(sc_config.broker,"broker.hivemq.com")==NULL &&
+           sc_private_broker(sc_config.broker) &&
            sc_config.mqtt_user[0] && sc_config.mqtt_password[0] &&
            sc_trusted_url(sc_config.trust_base);
 }
@@ -205,7 +250,7 @@ esp_err_t sc_parse_request(const char *json, sc_request_t *r)
              r->device,r->request_id,r->version,r->manifest_url,r->seq);
     return sc_verify_hmac(canonical,r->signature)?ESP_OK:ESP_ERR_INVALID_CRC;
 }
-esp_err_t sc_accept_request(const sc_request_t *r)
+esp_err_t sc_check_request(const sc_request_t *r)
 {
     uint32_t last=0; esp_err_t e=nvs_get_u32(store,"seq",&last);
     if(e!=ESP_OK && e!=ESP_ERR_NVS_NOT_FOUND) return e;
@@ -218,11 +263,18 @@ esp_err_t sc_accept_request(const sc_request_t *r)
     snprintf(current,sizeof(current),"%s",esp_app_get_description()->version);
 #endif
     if(r->seq<=last || !sc_version_newer(r->version,current)) return ESP_ERR_INVALID_STATE;
+    return ESP_OK;
+}
+esp_err_t sc_accept_request(const sc_request_t *r)
+{
+    esp_err_t e=sc_check_request(r);
+    if(e!=ESP_OK) return e;
     /* Persist replay floor first: a torn acceptance may consume a sequence, never replay it. */
     e=nvs_set_u32(store,"seq",r->seq); if(e==ESP_OK) e=nvs_commit(store);
     if(e!=ESP_OK) return e;
     e=nvs_set_blob(store,"request",r,sizeof(*r)); if(e==ESP_OK) e=nvs_commit(store);
     if(e==ESP_OK) e=nvs_set_u32(store,"failures",0);
+    if(e==ESP_OK) e=nvs_set_str(store,"last_error","");
     if(e==ESP_OK) e=sc_set_state("pending");
     return e;
 }
@@ -249,6 +301,18 @@ esp_err_t sc_set_state(const char *state)
     return put_string("state",state);
 }
 esp_err_t sc_get_state(char *state,size_t n) { return nvs_get_str(store,"state",state,&n); }
+esp_err_t sc_fail_update(const char *reason)
+{
+    if(!reason || strlen(reason)>=96) return ESP_ERR_INVALID_ARG;
+    esp_err_t e=nvs_set_str(store,"last_error",reason);
+    return e==ESP_OK?sc_set_state("failed"):e;
+}
+void sc_failure_reason(char *reason,size_t capacity)
+{
+    size_t n=capacity;
+    if(nvs_get_str(store,"last_error",reason,&n)!=ESP_OK || !reason[0])
+        snprintf(reason,capacity,"OTA_FAILED");
+}
 esp_err_t sc_go_recovery(void)
 {
     sc_relay_off();
@@ -290,7 +354,7 @@ esp_err_t sc_recovery_entry(void)
     esp_err_t e=nvs_get_u32(store,"failures",&failures);
     if(e!=ESP_OK && e!=ESP_ERR_NVS_NOT_FOUND) return e;
     e=nvs_set_u32(store,"failures",failures+1); if(e!=ESP_OK) return e;
-    return sc_set_state(failures+1>=3?"failed":"pending");
+    return failures+1>=3?sc_fail_update("OTA_BOOT_VALIDATION_FAILED"):sc_set_state("pending");
 }
 esp_err_t sc_confirm_healthy(void)
 {

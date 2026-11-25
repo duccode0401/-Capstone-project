@@ -11,7 +11,7 @@ load_dotenv(settings.BASE_DIR / ".env")
 
 from datetime import timedelta
 
-from django.http import FileResponse, JsonResponse, StreamingHttpResponse
+from django.http import FileResponse, Http404, JsonResponse, StreamingHttpResponse
 from django.shortcuts import render
 from django.core.exceptions import PermissionDenied
 from django.core.paginator import Paginator
@@ -30,12 +30,12 @@ from .models import (
     ChargerPort,
     DeviceLog,
     DeviceTelemetry,
+    OTAJob,
 )
 from .ota_services import authorize_job_token, build_manifest
+from .mqtt_config import mqtt_connection
 
 # ====================== MQTT CONFIG ======================
-MQTT_BROKER = "broker.hivemq.com"
-MQTT_PORT = 8883
 MQTT_TOPIC_ORDER = "iot/charge_station/v1/orders"
 
 # ====================== DASHBOARD CHO ADMIN ======================
@@ -111,6 +111,9 @@ def assign_session_to_free_slot(session: ChargingSession):
             ChargerPort.objects
             .select_for_update()
             .filter(is_active=True)
+            .exclude(device_id__in=OTAJob.objects.exclude(
+                status__in=OTAJob.TERMINAL_STATUSES
+            ).values("device_id"))
             .order_by("device__device_id", "port_no")
         )
 
@@ -205,9 +208,7 @@ def publish_start_once(session: ChargingSession):
             MQTT_TOPIC_ORDER,
             payload,
             qos=1,
-            hostname=MQTT_BROKER,
-            port=MQTT_PORT,
-            tls={},
+            **mqtt_connection(),
         )
     except Exception:
         # Cho phép retry nếu broker xác nhận publish thất bại. Nếu process chết
@@ -388,7 +389,7 @@ def _device_snapshot(device, now):
         "energy_total_wh": telemetry.energy_total_wh if telemetry else None,
         "energy_delta_wh": telemetry.energy_delta_wh if telemetry else None,
         "charging_status": telemetry.charging_status if telemetry else "UNKNOWN",
-        "last_update": telemetry.received_at if telemetry else device.last_seen_at,
+        "last_update": device.last_seen_at,
     }
 
 
@@ -471,8 +472,9 @@ def recent_logs_api(request):
 @require_GET
 def firmware_manifest(request, request_id, token):
     job = authorize_job_token(request_id, token)
-    response = JsonResponse(build_manifest(job, token))
-    response["Cache-Control"] = "no-store"
+    response = JsonResponse(build_manifest(job, token), json_dumps_params={"separators": (",", ":")})
+    response["Content-Length"] = str(len(response.content))
+    response["Cache-Control"] = "private, no-store, no-transform"
     response["X-Content-Type-Options"] = "nosniff"
     return response
 
@@ -495,7 +497,12 @@ def _range_iterator(file_handle, start, length, block_size=64 * 1024):
 def firmware_download(request, request_id, token):
     job = authorize_job_token(request_id, token)
     firmware = job.firmware
-    file_handle = firmware.file.open("rb")
+    try:
+        if firmware.file.size != firmware.file_size:
+            raise Http404("Firmware unavailable.")
+        file_handle = firmware.file.open("rb")
+    except FileNotFoundError as exc:
+        raise Http404("Firmware unavailable.") from exc
     range_header = request.headers.get("Range", "")
     match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_header)
     if range_header and not match:
@@ -525,6 +532,6 @@ def firmware_download(request, request_id, token):
         f'attachment; filename="smartcharge-{firmware.version}.bin"'
     )
     response["Accept-Ranges"] = "bytes"
-    response["Cache-Control"] = "private, no-store"
+    response["Cache-Control"] = "private, no-store, no-transform"
     response["X-Content-Type-Options"] = "nosniff"
     return response

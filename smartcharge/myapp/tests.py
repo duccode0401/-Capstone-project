@@ -1,10 +1,14 @@
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
+import hashlib
+import hmac
 import json
 import struct
 import tempfile
 from datetime import timedelta
 from threading import Barrier
 from unittest.mock import Mock, patch
+from urllib.parse import urlsplit
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
@@ -35,10 +39,18 @@ from .models import (
     FirmwareArtifact,
     OTAJob,
 )
-from .ota_services import create_and_issue_ota, process_ota_status
+from .ota_services import _probe_https_release, create_and_issue_ota, process_ota_status
 from .views import create_session_after_payment
 
 
+MQTT_TEST_SETTINGS = {
+    "MQTT_BROKER": "mqtt.example.com",
+    "MQTT_USERNAME": "backend",
+    "MQTT_PASSWORD": "test-password",
+}
+
+
+@override_settings(**MQTT_TEST_SETTINGS)
 class PaymentIdempotencyTests(TestCase):
     def setUp(self):
         self.device = ChargerDevice.objects.create(device_id="ESP32_001")
@@ -305,6 +317,15 @@ class FirmwareUploadTests(TestCase):
         with self.assertRaises(ValidationError):
             wrong_chip.full_clean()
 
+    def test_embedded_version_and_project_are_checked(self):
+        for image in (
+            esp_idf_image(version="1.0.0"),
+            esp_idf_image(project="recovery"),
+            esp_idf_image(version="65536.0.0"),
+        ):
+            with self.subTest(image=image[48:112]), self.assertRaises(ValidationError):
+                self.artifact(content=image).full_clean()
+
     def test_main_firmware_partition_limit_is_enforced(self):
         oversized = self.artifact(content=esp_idf_image(size=0x2F0000))
         with self.assertRaises(ValidationError):
@@ -330,8 +351,7 @@ class FirmwareUploadTests(TestCase):
 OTA_TEST_SETTINGS = {
     "FIRMWARE_HTTPS_BASE_URL": "https://ota.example.com",
     "OTA_DEVICE_KEYS_JSON": json.dumps({"ESP32_001": "11" * 32}),
-    "MQTT_USERNAME": "backend",
-    "MQTT_PASSWORD": "secret-password",
+    **MQTT_TEST_SETTINGS,
     "DEVICE_STALE_SECONDS": 30,
 }
 
@@ -339,6 +359,7 @@ OTA_TEST_SETTINGS = {
 @override_settings(MEDIA_ROOT=tempfile.gettempdir(), **OTA_TEST_SETTINGS)
 class OTAWorkflowTests(TestCase):
     def setUp(self):
+        self.probe = self.enterContext(patch('myapp.ota_services._probe_https_release'))
         self.user = get_user_model().objects.create_user(
             username="ota-admin", password="test", is_staff=True
         )
@@ -362,39 +383,49 @@ class OTAWorkflowTests(TestCase):
         self.firmware.full_clean()
         self.firmware.save()
 
-    @patch("myapp.ota_services.mqtt_publish.single")
+    def issue_ota(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            return create_and_issue_ota(self.device, self.firmware, self.user)
+
+    @patch("myapp.ota_services.publish_once")
     def test_create_job_publishes_signed_command_once(self, publish):
-        job, command = create_and_issue_ota(self.device, self.firmware, self.user)
+        job, command = self.issue_ota()
         self.assertEqual(job.status, "PENDING")
         self.assertEqual(command["device"], "ESP32_001")
         self.assertEqual(command["seq"], "1")
-        self.assertEqual(len(command["signature"]), 64)
+        canonical = ("SC-CMD-1\nESP32_001\nSTART_OTA\n"
+                     f"{job.request_id}\n1.1.0\n{command['manifest_url']}\n1")
+        self.assertEqual(command["signature"], hmac.new(bytes.fromhex("11" * 32), canonical.encode(), "sha256").hexdigest())
+        self.assertEqual(publish.call_args.args[0], "iot/charge_station/v1/ota/command")
+        self.assertEqual(json.loads(publish.call_args.args[1]), command)
+        self.assertFalse(publish.call_args.kwargs["retain"])
+        self.assertTrue(publish.call_args.kwargs["tls"].check_hostname)
         publish.assert_called_once()
         self.assertEqual(OTAJob.objects.count(), 1)
         with self.assertRaises(ValidationError):
-            create_and_issue_ota(self.device, self.firmware, self.user)
+            self.issue_ota()
         publish.assert_called_once()
 
-    @patch("myapp.ota_services.mqtt_publish.single")
+    @patch("myapp.ota_services.publish_once")
     def test_reject_ota_while_charging(self, publish):
         ChargingSession.objects.create(
             device=self.device, port_no=1, amount_vnd=10000, status="charging"
         )
         with self.assertRaises(ValidationError):
-            create_and_issue_ota(self.device, self.firmware, self.user)
+            self.issue_ota()
         publish.assert_not_called()
 
-    @patch("myapp.ota_services.mqtt_publish.single")
+    @patch("myapp.ota_services.publish_once")
     def test_reject_ota_when_offline_or_unknown(self, publish):
         self.device.last_seen_at = timezone.now() - timedelta(minutes=5)
         self.device.save(update_fields=["last_seen_at"])
         with self.assertRaises(ValidationError):
-            create_and_issue_ota(self.device, self.firmware, self.user)
+            self.issue_ota()
         publish.assert_not_called()
 
-    @patch("myapp.ota_services.mqtt_publish.single")
+    @patch("myapp.ota_services.publish_once")
     def test_ota_status_matches_request_and_duplicate_is_safe(self, publish):
-        job, _ = create_and_issue_ota(self.device, self.firmware, self.user)
+        job, _ = self.issue_ota()
         payload = {
             "device": "ESP32_001", "request_id": job.request_id,
             "status": "ACCEPTED", "progress": 0, "version": "1.1.0",
@@ -408,16 +439,25 @@ class OTAWorkflowTests(TestCase):
         with self.assertRaises(ValidationError):
             process_ota_status(payload)
 
-    @patch("myapp.ota_services.mqtt_publish.single")
+    @patch("myapp.ota_services.publish_once")
     def test_manifest_and_range_download_require_job_token(self, publish):
-        job, command = create_and_issue_ota(self.device, self.firmware, self.user)
+        job, command = self.issue_ota()
         token = command["manifest_url"].rstrip("/").split("/")[-1]
         manifest = self.client.get(
             reverse("myapp:firmware_manifest", args=[job.request_id, token])
         )
         self.assertEqual(manifest.status_code, 200)
         self.assertEqual(manifest.json()["sha256"], self.firmware.sha256)
-        self.assertEqual(len(manifest.json()["signature"]), 64)
+        self.assertEqual(int(manifest["Content-Length"]), len(manifest.content))
+        data = manifest.json()
+        canonical = (f"SC-MANIFEST-1\nESP32_001\n{job.request_id}\n1.1.0\n"
+                     f"{data['url']}\n{data['size']}\n{data['sha256']}\nesp32\n1")
+        self.assertEqual(data["signature"], hmac.new(bytes.fromhex("11" * 32), canonical.encode(), "sha256").hexdigest())
+        binary = self.client.get(reverse("myapp:firmware_download", args=[job.request_id, token]))
+        self.assertEqual(binary.status_code, 200)
+        self.assertEqual(binary["Content-Type"], "application/octet-stream")
+        self.assertEqual(int(binary["Content-Length"]), data["size"])
+        self.assertEqual(hashlib.sha256(b"".join(binary.streaming_content)).hexdigest(), data["sha256"])
         partial = self.client.get(
             reverse("myapp:firmware_download", args=[job.request_id, token]),
             HTTP_RANGE="bytes=0-31",
@@ -430,14 +470,102 @@ class OTAWorkflowTests(TestCase):
         )
         self.assertEqual(denied.status_code, 403)
 
-    @patch("myapp.ota_services.mqtt_publish.single")
+    @patch("myapp.ota_services.publish_once")
     def test_success_requires_reported_firmware_version(self, publish):
-        job, _ = create_and_issue_ota(self.device, self.firmware, self.user)
+        job, _ = self.issue_ota()
         with self.assertRaises(ValidationError):
             process_ota_status({
                 "device": "ESP32_001", "request_id": job.request_id,
                 "status": "SUCCESS", "progress": 100, "version": "9.9.9",
             })
+
+
+    @patch("myapp.ota_services.publish_once")
+    def test_admin_add_publishes_only_after_commit(self, publish):
+        self.user.user_permissions.add(Permission.objects.get(codename="add_otajob"))
+        self.client.force_login(self.user)
+        url = reverse("admin:myapp_otajob_add")
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(url, {
+                "device": self.device.pk, "firmware": self.firmware.pk, "confirm_ota": "on",
+            })
+            publish.assert_not_called()
+        self.assertEqual(response.status_code, 302)
+        publish.assert_called_once()
+        self.assertIsNotNone(OTAJob.objects.get().command_sent_at)
+
+    @patch("myapp.ota_services.publish_once")
+    def test_invalid_proxy_response_prevents_publish(self, publish):
+        self.probe.side_effect = ValueError("bad response")
+        job, _ = self.issue_ota()
+        self.assertEqual(job.status, "FAILED")
+        publish.assert_not_called()
+
+    @patch("myapp.ota_services.requests.get")
+    @patch("myapp.ota_services.publish_once")
+    def test_https_probe_rejects_html_and_chunking(self, publish, get):
+        job, command = self.issue_ota()
+        manifest = self.client.get(urlsplit(command["manifest_url"]).path)
+        binary_bytes = esp_idf_image()
+
+        def reply(content_type, raw, **headers):
+            response = Mock(status_code=200, headers={
+                "Content-Type": content_type, "Content-Length": str(len(raw)), **headers,
+            })
+            response.iter_content.return_value = iter([raw])
+            return response
+
+        def probe_with(binary):
+            get.side_effect = [
+                nullcontext(reply("application/json", manifest.content)),
+                nullcontext(binary),
+            ]
+            _probe_https_release(job, command)
+
+        probe_with(reply("application/octet-stream", binary_bytes))
+        for binary in (
+            reply("text/html", b"<html>ngrok</html>"),
+            reply("application/octet-stream", binary_bytes, **{"Transfer-Encoding": "chunked"}),
+            reply("application/octet-stream", b"x" * len(binary_bytes)),
+        ):
+            with self.assertRaises(ValueError):
+                probe_with(binary)
+
+    @override_settings(MQTT_BROKER="broker.hivemq.com")
+    @patch("myapp.ota_services.publish_once")
+    def test_public_broker_prevents_publish(self, publish):
+        with self.assertRaises(ValidationError):
+            self.issue_ota()
+        publish.assert_not_called()
+
+    @patch("myapp.ota_services.publish_once")
+    def test_recovery_retry_and_boot_confirmation(self, publish):
+        job, _ = self.issue_ota()
+        payload = {"device": self.device.device_id, "request_id": job.request_id, "version": "1.1.0"}
+
+        def report(status, progress):
+            return process_ota_status(dict(payload, status=status, progress=progress))[0]
+
+        for status, progress in (("ACCEPTED", 0), ("REBOOTING", 0), ("RECOVERING", 0), ("DOWNLOADING", 70)):
+            self.assertEqual(report(status, progress).status, status)
+        self.assertIn("FAILED", report("FAILED", 0).error_message)
+        for status, progress in (("RECOVERING", 0), ("DOWNLOADING", 0), ("VERIFYING", 100), ("INSTALLING", 100), ("REBOOTING", 100)):
+            self.assertEqual(report(status, progress).status, status)
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.firmware_version, "")
+        self.assertEqual(report("SUCCESS", 100).status, "SUCCESS")
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.firmware_version, "1.1.0")
+
+
+@override_settings(OTA_PUBLIC_HOST="ota.example.com", ALLOWED_HOSTS=["testserver", "ota.example.com"])
+class FirmwareTunnelTests(TestCase):
+    def test_public_host_blocks_admin_payment_and_dashboard(self):
+        for url in ("/admin/", "/api/check-payment/", "/dashboard/devices/"):
+            self.assertEqual(self.client.get(url, HTTP_HOST="ota.example.com").status_code, 404)
+            self.assertEqual(self.client.get(url, HTTP_X_FORWARDED_PROTO="https").status_code, 404)
+        self.assertEqual(self.client.get("/admin/").status_code, 302)
+        self.assertEqual(self.client.get("/firmware/manifest/ota-test/" + "x" * 43 + "/", HTTP_HOST="ota.example.com").status_code, 403)
 
 
 class IoTMessageTests(TestCase):

@@ -11,10 +11,14 @@ from urllib.parse import urlsplit
 
 
 def trusted_url(url, base):
-    p = urlsplit(base)
-    return (p.scheme == "https" and p.hostname and base.endswith("/")
+    try:
+        p = urlsplit(base)
+        valid_authority = p.hostname and re.fullmatch(r"[A-Za-z0-9.-]+", p.hostname) and p.port != 0
+    except ValueError:
+        return False
+    return (base.startswith("https://") and valid_authority and base.endswith("/")
             and url.startswith(base) and len(url) < 384
-            and not any(c in url for c in "\r\n\t @?#%\\") and ".." not in url[8:])
+            and re.fullmatch(r"[A-Za-z0-9._~:/-]+", url) is not None and ".." not in url[8:])
 
 
 def command_text(command):

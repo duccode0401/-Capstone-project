@@ -1,5 +1,12 @@
 # SmartCharge Recovery OTA, telemetry và event log
 
+> Cập nhật tích hợp local/ngrok 2026-11-21: xem
+> [LOCAL_OTA_FLASH_GUIDE.md](LOCAL_OTA_FLASH_GUIDE.md) trước khi provision/nạp.
+> Domain cấu hình qua NVS; C không hard-code ngrok. Phần xử lý lỗi hiện phân biệt
+> RECOVERING (retry lỗi mạng/HTML ngrok) và FAILED (lỗi cứng), kèm trường `error`
+> đã được parser Web hỗ trợ. Những khác biệt còn lại ở state/TTL phía Web được
+> liệt kê trong guide, không tự sửa Django hoặc thay canonical/topic.
+
 ## Trạng thái và phạm vi
 
 Hai ứng dụng ESP32 / ESP-IDF **5.5.1** độc lập:
@@ -325,6 +332,16 @@ high watermark nội bộ MQTT task trực tiếp. Linker pass không chứng mi
 khi có hai kết nối TLS: cần xem MEM trong bài test tải HTTPS + MQTT.
 
 ## Checklist test trên board và server
+
+Đường HTTP hiện yêu cầu manifest `application/json`, binary
+`application/octet-stream`, Content-Length dương đúng giới hạn, HTTP 200,
+không redirect/chunked/gzip. Header ngrok-skip-browser-warning=1 và User-Agent
+SmartCharge-OTA/1 được gửi cho cả manifest lẫn binary. HTML ở header hoặc prefix
+bị từ chối trước esp_ota_begin; không in URL capability/server body lên log.
+Mã lỗi HTTPS_* đi qua UART và trường error trên OTA status. Sai MAC/hash/image
+hoặc capability 401/403 giữ Recovery và chờ request mới, không retry vô hạn.
+Lỗi transient vẫn giữ pending và tải lại từ đầu, với điều kiện server chưa thu
+hồi/hết hạn capability. Firmware không có quyền tự gia hạn token phía Django.
 
 1. Disconnect tải, flash migration, đo GPIO25 từ reset bằng oscilloscope. Relay
    phải OFF cả trong Recovery, startup, lỗi sensor, reboot. Không tự nối lại phiên cũ.

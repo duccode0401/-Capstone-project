@@ -5,6 +5,7 @@
 The operator must be staff and have these Django permissions:
 
 - `Firmware artifact | Can add/view/change firmware artifact`
+- `OTA job | Can add OTA job`
 - `OTA job | Can view OTA job`
 - `OTA job | Can deploy approved firmware`
 - `Device telemetry | Can view device telemetry`
@@ -36,7 +37,9 @@ validation and cannot use this flow.
 
 Server validation rejects stale/offline/unknown devices, active charging,
 unapproved or wrong-target images, missing HTTPS/HMAC settings, and unauthenticated
-MQTT configuration. A `PENDING` job only means the command was published. Wait for
+MQTT configuration. Before publishing, the backend probes the manifest and binary
+through HTTPS. A `PENDING` job is still waiting for an ESP32 status. Check
+`command_sent_at` for the broker acknowledgement. Wait for
 `ACCEPTED`, download/verify/install/reboot states, and finally `SUCCESS` after the
 new firmware reports the expected version.
 

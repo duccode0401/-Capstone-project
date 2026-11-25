@@ -8,7 +8,7 @@
 </head>
 <body><main class="shell">
   <div class="topbar">
-    <div><h1>Device Monitoring</h1><p class="muted">Tự cập nhật mỗi 5 giây; dữ liệu cũ sẽ chuyển OFFLINE.</p></div>
+    <div><h1>Device Monitoring</h1><p class="muted">Tự cập nhật mỗi 10 giây; dữ liệu cũ sẽ chuyển OFFLINE.</p></div>
     <nav class="nav"><a href="{% url 'myapp:device_logs_dashboard' %}">Device logs</a><a href="{% url 'admin:index' %}">Admin</a></nav>
   </div>
   <section id="device-cards" class="cards">
@@ -23,7 +23,7 @@
         <div class="metric"><span>10s energy</span><strong data-key="energy_delta_wh">{{ d.energy_delta_wh|default_if_none:"—" }}</strong> Wh</div>
         <div class="metric"><span>State</span><strong data-key="charging_status">{{ d.charging_status }}</strong></div>
       </div>
-      <p class="muted">Last update: <span data-key="last_update">{{ d.last_update|default:"—" }}</span></p>
+      <p class="muted">Last seen: <span data-key="last_update">{{ d.last_update|default:"—" }}</span></p>
     </article>
   {% empty %}<p>Chưa có thiết bị.</p>{% endfor %}
   </section>
@@ -48,5 +48,5 @@ async function refreshDevices() {
     });
   } catch (_) {}
 }
-setInterval(refreshDevices, 5000);
+setInterval(refreshDevices, 10000);
 </script></body></html>

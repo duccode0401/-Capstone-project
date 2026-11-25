@@ -16,4 +16,4 @@ partition_table_add_check_size_target(sc_slot_check
 add_custom_target(sc_strict_size ALL
     COMMAND ${sc_python} "${CMAKE_CURRENT_LIST_DIR}/../tools/check_artifact.py"
             "${sc_build}/${PROJECT_NAME}.bin" ${SC_SLOT_SIZE}
-    DEPENDS gen_project_binary sc_slot_check)
+    DEPENDS gen_project_binary sc_slot_check VERBATIM)

@@ -1,59 +1,43 @@
-# firmware_smartcharge
+﻿# SmartCharge firmware (ESP-IDF 5.5.1 / ESP32 4 MiB)
 
-Firmware component copied from ADC/main for SmartCharge project.
+Main application: ADC continuous power measurement, LVGL/ILI9341, payment,
+relay control, Wi-Fi/MQTT, 10-second telemetry and bounded event logging.
+Recovery is a separate application under `../recovery/`.
 
-Contains example display, wifi/mqtt and power meter code for ESP32 (ESP-IDF).
+Read [OTA_MQTT_PROTOCOL.md](../OTA_MQTT_PROTOCOL.md) before flashing. The layout
+has changed: factory is now **Recovery (1 MiB)** and SmartCharge runs from
+**ota_0 (0x110000, 0x2F0000 bytes)**. Do not flash this app to factory or reuse
+the old build-esp32 flash commands. Initial migration needs NVS reprovisioning
+and both binaries; the documented installer backs up flash first.
 
-## Build, flash and monitor (Windows, ESP-IDF 5.5.1)
-
-Open a new PowerShell terminal and load the ESP-IDF environment installed on
-this machine. Do this again whenever a new terminal is opened:
+From the firmware directory in PowerShell:
 
 ```powershell
 . "C:\Espressif\tools\Microsoft.v5.5.1.PowerShell_profile.ps1"
-cd D:\-Capstone-project-main\firmware
+idf.py -B build-smartcharge -D SDKCONFIG=sdkconfig.ota build
+Push-Location recovery
+idf.py -B build-recovery -D SDKCONFIG=sdkconfig.recovery build
+Pop-Location
+python tools/verify_builds.py
+python -m unittest discover -s tests -v
 ```
 
-Do not use `D:\Espressif\v5.5.1\esp-idf\export.ps1` for this installation.
-The profile above sets the correct `IDF_PATH`, `IDF_TOOLS_PATH` and ESP-IDF
-Python environment under `C:\Espressif\tools`.
-
-Build the firmware:
+After the explicit initial migration, open the serial monitor:
 
 ```powershell
-idf.py -B build-esp32 build
+idf.py -B build-smartcharge -D SDKCONFIG=sdkconfig.ota -p COM3 monitor
 ```
 
-Flash the firmware through COM3:
+Press `Ctrl + ]` to exit. Replace COM3 with the actual port.
 
-```powershell
-idf.py -B build-esp32 -p COM3 flash
-```
+External components download into managed_components: ILI9341 2.1.0,
+LVGL (resolved version in dependencies.lock), and cmake_utilities.
+NVS initializes before continuous ADC starts, and ADC interrupts are IRAM-safe.
+Credentials and per-device OTA trust settings live in the shared NVS namespace
+`sc`; use the provisioning tool documented in OTA_MQTT_PROTOCOL.md.
+The optional legacy menuconfig Wi-Fi values default to empty and do not enable OTA.
 
-Open the COM3 serial monitor at 115200 baud:
-
-```powershell
-idf.py -B build-esp32 -p COM3 -b 115200 monitor
-```
-
-Press `Ctrl + ]` to exit the serial monitor.
-
-Build, flash and open the serial monitor in one command:
-
-```powershell
-idf.py -B build-esp32 -p COM3 -b 115200 build flash monitor
-```
-
-External components are downloaded automatically into `managed_components`:
-ILI9341 2.1.0, LVGL (version resolved in `dependencies.lock`), and the
-ILI9341 dependency `espressif/cmake_utilities`. ADC, SPI, GPIO, LCD, timers,
-Wi-Fi, MQTT, NVS and FreeRTOS are included with ESP-IDF.
-`sdkconfig.defaults` selects ESP32 and a 1500 KiB application partition because
-the firmware exceeds the default 1 MiB application partition.
-Continuous ADC interrupts use `CONFIG_ADC_CONTINUOUS_ISR_IRAM_SAFE=y` so they
-can run while flash operations disable the cache. NVS is initialized before
-starting the ADC to avoid a cache-access panic during startup.
-
-Configure Wi-Fi using `idf.py -B build-esp32 menuconfig` under
-`Example Configuration`. If Windows assigns another serial port, replace
-`COM3` in the commands above with that port.
+MEM logs show physical flash, partition bounds, free/minimum/largest internal
+heap, task stack high watermarks and message drops. Runtime diagnostics run
+approximately every 10 seconds. Build and host-test results, plus outstanding
+hardware tests, are recorded in [VALIDATION_RESULTS.md](../VALIDATION_RESULTS.md).

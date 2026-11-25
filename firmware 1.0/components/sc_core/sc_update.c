@@ -5,6 +5,7 @@
 #include <ctype.h>
 #include <inttypes.h>
 #include <time.h>
+#include <strings.h>
 #include "cJSON.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
@@ -17,22 +18,93 @@
 #include "mbedtls/sha256.h"
 
 typedef struct { char url[384],sha[65]; int size; } manifest_t;
-static esp_http_client_handle_t open_https(const char *url,int expected_max)
+typedef struct {
+    char content_type[80],encoding[32];
+    bool invalid;
+    unsigned type_count,length_count,encoding_count;
+} http_headers_t;
+
+const char *sc_update_error_name(esp_err_t error)
 {
-    if(!sc_trusted_url(url) || time(NULL)<1735689600) return NULL;
+    if(error>SC_OTA_HTTP_ERROR_BASE && error<=SC_OTA_HTTP_ERROR_BASE+SC_HTTP_JSON_PREFIX)
+        return sc_http_result_name(error-SC_OTA_HTTP_ERROR_BASE);
+    if(error==SC_OTA_ERR_TLS_CONNECT) return "HTTPS_TLS_OR_CONNECT_FAILED";
+    if(error==SC_OTA_ERR_DOWNLOAD_INTERRUPTED) return "HTTPS_DOWNLOAD_INTERRUPTED";
+    return esp_err_to_name(error);
+}
+bool sc_update_retryable(esp_err_t error)
+{
+    /* A retry cannot repair authenticated corrupt images, signatures or an expired capability. */
+    return error==SC_OTA_ERR_TLS_CONNECT || error==SC_OTA_ERR_DOWNLOAD_INTERRUPTED ||
+           error==ESP_ERR_TIMEOUT || error==ESP_ERR_NO_MEM ||
+           error==SC_OTA_HTTP_ERROR_BASE+SC_HTTP_STATUS ||
+           error==SC_OTA_HTTP_ERROR_BASE+SC_HTTP_HTML;
+}
+static esp_err_t response_header(esp_http_client_event_t *event)
+{
+    if(event->event_id!=HTTP_EVENT_ON_HEADER || !event->user_data) return ESP_OK;
+    http_headers_t *headers=event->user_data;
+    char *destination=NULL; size_t capacity=0;
+    if(!strcasecmp(event->header_key,"Content-Type")) {
+        destination=headers->content_type; capacity=sizeof(headers->content_type);
+        if(++headers->type_count>1) headers->invalid=true;
+    } else if(!strcasecmp(event->header_key,"Content-Encoding")) {
+        destination=headers->encoding; capacity=sizeof(headers->encoding);
+        if(++headers->encoding_count>1) headers->invalid=true;
+    } else if(!strcasecmp(event->header_key,"Content-Length")) {
+        if(++headers->length_count>1) headers->invalid=true;
+    }
+    if(destination) {
+        if(strlen(event->header_value)>=capacity) headers->invalid=true;
+        else strcpy(destination,event->header_value);
+    }
+    return ESP_OK;
+}
+static void close_https(esp_http_client_handle_t h)
+{
+    if(h) { esp_http_client_close(h); esp_http_client_cleanup(h); }
+}
+static esp_err_t open_https(const char *url,int expected_max,bool image,
+    esp_http_client_handle_t *out,http_headers_t *headers)
+{
+    *out=NULL; memset(headers,0,sizeof(*headers));
+    if(!sc_trusted_url(url)) return ESP_ERR_INVALID_ARG;
+    if(time(NULL)<1735689600) return ESP_ERR_INVALID_STATE;
     esp_http_client_config_t c={.url=url,.crt_bundle_attach=esp_crt_bundle_attach,
         .timeout_ms=10000,.buffer_size=1024,.buffer_size_tx=512,
         .disable_auto_redirect=true,.keep_alive_enable=false,
+        .skip_cert_common_name_check=false,
+        .event_handler=response_header,.user_data=headers,
+        .user_agent="SmartCharge-OTA/1",
         .transport_type=HTTP_TRANSPORT_OVER_SSL};
     esp_http_client_handle_t h=esp_http_client_init(&c);
-    if(!h) return NULL;
-    if(esp_http_client_open(h,0)!=ESP_OK) { esp_http_client_cleanup(h); return NULL; }
-    int64_t n=esp_http_client_fetch_headers(h);
-    if(esp_http_client_get_status_code(h)!=200 || n<=0 || n>expected_max ||
-       esp_http_client_is_chunked_response(h)) {
-        esp_http_client_close(h); esp_http_client_cleanup(h); return NULL;
+    if(!h) return ESP_ERR_NO_MEM;
+    /* Client-side ngrok header, not an authentication bypass or a TLS exception. */
+    esp_err_t e=esp_http_client_set_header(h,"ngrok-skip-browser-warning","1");
+    if(e==ESP_OK) e=esp_http_client_set_header(h,"Accept-Encoding","identity");
+    if(e==ESP_OK) e=esp_http_client_set_header(h,"Accept",image?"application/octet-stream":"application/json");
+    if(e!=ESP_OK) { close_https(h); return e; }
+    e=esp_http_client_open(h,0);
+    if(e!=ESP_OK) {
+        int tls_code=0,tls_flags=0;
+        esp_http_client_get_and_clear_last_tls_error(h,&tls_code,&tls_flags);
+        ESP_LOGW("OTA","HTTPS connect failed: %s tls_code=%d verify_flags=0x%x",esp_err_to_name(e),tls_code,tls_flags);
+        close_https(h); return SC_OTA_ERR_TLS_CONNECT;
     }
-    return h;
+    int64_t n=esp_http_client_fetch_headers(h);
+    if(n<0) { close_https(h); return SC_OTA_ERR_DOWNLOAD_INTERRUPTED; }
+    int status=esp_http_client_get_status_code(h);
+    sc_http_result_t policy=sc_http_check_headers(status,n,esp_http_client_is_chunked_response(h),
+        headers->content_type,headers->encoding,expected_max,image);
+    if(headers->invalid || headers->length_count!=1) {
+        if(policy==SC_HTTP_OK) policy=SC_HTTP_LENGTH;
+    }
+    if(policy!=SC_HTTP_OK) {
+        /* No URL, Location, server body or capability is included in the diagnostic. */
+        ESP_LOGW("OTA","%s HTTP status=%d rejected: %s",image?"Binary":"Manifest",status,sc_http_result_name(policy));
+        close_https(h); return SC_OTA_HTTP_ERROR_BASE+policy;
+    }
+    *out=h; return ESP_OK;
 }
 static bool get_string(cJSON *j,const char *key,char *dst,size_t cap)
 {
@@ -42,18 +114,23 @@ static bool get_string(cJSON *j,const char *key,char *dst,size_t cap)
 }
 static esp_err_t fetch_manifest(const sc_request_t *r,manifest_t *m)
 {
-    esp_http_client_handle_t h=open_https(r->manifest_url,2048);
-    if(!h) return ESP_FAIL;
+    esp_http_client_handle_t h=NULL; http_headers_t headers;
+    esp_err_t e=open_https(r->manifest_url,2048,false,&h,&headers);
+    if(e!=ESP_OK) return e;
     int total=(int)esp_http_client_get_content_length(h),used=0;
     char *body=calloc(1,total+1);
-    if(!body) { esp_http_client_cleanup(h); return ESP_ERR_NO_MEM; }
+    if(!body) { close_https(h); return ESP_ERR_NO_MEM; }
     while(used<total) {
         int n=esp_http_client_read(h,body+used,total-used);
         if(n<=0) break;
         used+=n;
     }
     bool complete=used==total && esp_http_client_is_complete_data_received(h);
-    esp_http_client_close(h); esp_http_client_cleanup(h);
+    close_https(h);
+    if(!complete) { free(body); return SC_OTA_ERR_DOWNLOAD_INTERRUPTED; }
+    sc_http_result_t prefix=sc_http_check_prefix((const unsigned char *)body,total,false);
+    if(prefix!=SC_HTTP_OK) { free(body); return SC_OTA_HTTP_ERROR_BASE+prefix; }
+    if(memchr(body,0,total)) { free(body); return ESP_ERR_INVALID_RESPONSE; }
     cJSON *j=complete?sc_parse_flat_json(body,2048):NULL;
     free(body);
     if(!j) return ESP_ERR_INVALID_RESPONSE;
@@ -89,11 +166,12 @@ esp_err_t sc_install(const sc_request_t *r)
     err=sc_set_state("pending"); if(err!=ESP_OK) return err;
     manifest_t m={0};
     err=fetch_manifest(r,&m); if(err!=ESP_OK) return err;
-    esp_http_client_handle_t h=open_https(m.url,m.size);
-    if(!h) return ESP_ERR_INVALID_RESPONSE;
-    if(esp_http_client_get_content_length(h)!=m.size) { esp_http_client_cleanup(h); return ESP_ERR_INVALID_SIZE; }
+    esp_http_client_handle_t h=NULL; http_headers_t headers;
+    err=open_https(m.url,m.size,true,&h,&headers);
+    if(err!=ESP_OK) return err;
+    if(esp_http_client_get_content_length(h)!=m.size) { close_https(h); return ESP_ERR_INVALID_SIZE; }
     unsigned char *buf=malloc(1024);
-    if(!buf) { esp_http_client_cleanup(h); return ESP_ERR_NO_MEM; }
+    if(!buf) { close_https(h); return ESP_ERR_NO_MEM; }
     esp_ota_handle_t ota=0;
     mbedtls_sha256_context sha; mbedtls_sha256_init(&sha);
     err=mbedtls_sha256_starts(&sha,0)==0?ESP_OK:ESP_FAIL;
@@ -107,11 +185,13 @@ esp_err_t sc_install(const sc_request_t *r)
         while(used<want) {
             if(esp_timer_get_time()>deadline) { err=ESP_ERR_TIMEOUT; break; }
             int n=esp_http_client_read(h,(char *)buf+used,want-used);
-            if(n<=0) { err=ESP_ERR_INVALID_RESPONSE; break; }
+            if(n<=0) { err=SC_OTA_ERR_DOWNLOAD_INTERRUPTED; break; }
             used+=n;
         }
         if(err!=ESP_OK) break;
         if(received==0) {
+            sc_http_result_t prefix=sc_http_check_prefix(buf,used,true);
+            if(prefix!=SC_HTTP_OK) { err=SC_OTA_HTTP_ERROR_BASE+prefix; break; }
             esp_image_header_t header; esp_app_desc_t desc;
             memcpy(&header,buf,sizeof(header));
             memcpy(&desc,buf+sizeof(header)+sizeof(esp_image_segment_header_t),sizeof(desc));
@@ -128,7 +208,7 @@ esp_err_t sc_install(const sc_request_t *r)
         if(p!=progress) { sc_status(r,"DOWNLOADING",p); progress=p; }
     }
     unsigned char digest[32]={0}; char hex[65];
-    if(err==ESP_OK && (received!=m.size || !esp_http_client_is_complete_data_received(h))) err=ESP_ERR_INVALID_SIZE;
+    if(err==ESP_OK && (received!=m.size || !esp_http_client_is_complete_data_received(h))) err=SC_OTA_ERR_DOWNLOAD_INTERRUPTED;
     if(err==ESP_OK) {
         sc_status(r,"VERIFYING",100);
         if(mbedtls_sha256_finish(&sha,digest)!=0) err=ESP_FAIL;
@@ -136,7 +216,7 @@ esp_err_t sc_install(const sc_request_t *r)
         if(err==ESP_OK && strcmp(hex,m.sha)) err=ESP_ERR_INVALID_CRC;
     }
     mbedtls_sha256_free(&sha); free(buf);
-    esp_http_client_close(h); esp_http_client_cleanup(h);
+    close_https(h);
     if(err!=ESP_OK) { if(ota) esp_ota_abort(ota); return err; }
     /* esp_ota_end verifies chip revision, checksum and full ESP image structure. */
     err=esp_ota_end(ota); if(err!=ESP_OK) return err;

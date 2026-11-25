@@ -1,5 +1,7 @@
 # OTA server setup
 
+For the assigned ngrok domain on Windows, follow [the local guide](LOCAL_NGROK_OTA_SETUP.md).
+
 ## Environment
 
 Copy `.env.example` to `.env` and configure at least:
@@ -13,8 +15,8 @@ MQTT_USERNAME=smartcharge-backend
 MQTT_PASSWORD=<strong unique password>
 ```
 
-The HTTPS base must exactly match the `trust_base` provisioned on each ESP32,
-including the trusted path prefix. The device's `key_hex` must match its entry in
+Use an HTTPS origin. Set the ESP32 `trust_base` to that same origin with a
+trailing slash. The device's `key_hex` must match its entry in
 `OTA_DEVICE_KEYS_JSON`. Use a different random 32-byte key per device. Do not
 commit keys, MQTT credentials or `.env`.
 
@@ -87,7 +89,7 @@ server must not serve production firmware.
 ## Operations and retention
 
 `DEVICE_STALE_SECONDS` defaults to 30 seconds. OTA status timeout defaults to
-300 seconds and the capability TTL to 7200 seconds. Keep one subscriber running
+900 seconds and the capability TTL to 7200 seconds. Keep one subscriber running
 under systemd, Docker Compose, Supervisor, or another process manager and alert
 on repeated disconnect/database errors. Back up the database and private firmware
 directory together. Configure broker ACLs per device; TLS without authentication

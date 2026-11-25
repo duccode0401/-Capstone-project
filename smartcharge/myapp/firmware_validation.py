@@ -1,3 +1,4 @@
+import re
 import struct
 
 from django.core.exceptions import ValidationError
@@ -18,13 +19,21 @@ def _cstring(data):
     return data.split(b"\0", 1)[0].decode("ascii", errors="strict")
 
 
+def version_parts(version):
+    if len(version) < 32 and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+        parts = tuple(map(int, version.split(".")))
+        if max(parts) <= 65535:
+            return parts
+    return None
+
+
 def inspect_esp_idf_image(uploaded_file, firmware_type):
     if not uploaded_file.name.lower().endswith(".bin"):
         raise ValidationError("Chỉ chấp nhận file có phần mở rộng .bin.")
 
     size = uploaded_file.size
     limit = MAIN_SLOT_SIZE if firmware_type == "main" else RECOVERY_SLOT_SIZE
-    if size < MIN_IMAGE_SIZE:
+    if size <= MIN_IMAGE_SIZE:
         raise ValidationError("File quá nhỏ để là ESP-IDF application image.")
     # Firmware hiện tại yêu cầu size < partition size.
     if size >= limit:
@@ -65,6 +74,9 @@ def inspect_esp_idf_image(uploaded_file, firmware_type):
         )
     if not version or len(version) > 31:
         raise ValidationError("Version trong app descriptor không hợp lệ.")
+
+    if firmware_type == "main" and not version_parts(version):
+        raise ValidationError("SmartCharge version must be X.Y.Z with each part at most 65535.")
 
     return {
         "chip_target": "esp32",

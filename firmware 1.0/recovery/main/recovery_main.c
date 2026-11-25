@@ -40,17 +40,30 @@ void app_main(void)
         if(pending && sc_load_request(&request)==ESP_OK && sc_download_ready()) {
             sc_status(&request,"RECOVERING",0);
             e=sc_install(&request);
-            sc_status(&request,"FAILED",0);
-            sc_log("ERROR","OTA_FAILED","Update failed; staying in Recovery and retrying");
-            ESP_LOGE("RECOVERY","Install failed: %s",esp_err_to_name(e));
+            const char *reason=sc_update_error_name(e);
+            bool retry=sc_update_retryable(e);
+            /* FAILED is terminal in Django and revokes the download capability.
+             * Transient failures retain pending and are announced as RECOVERING.
+             * Backend must allow retry transitions / progress restart; see integration guide. */
+            if(!retry) ESP_ERROR_CHECK(sc_fail_update(reason));
+            sc_status_error(&request,retry?"RECOVERING":"FAILED",0,reason);
+            sc_log("ERROR","OTA_FAILED",reason);
+            ESP_LOGE("RECOVERY","Install failed: %s; retry=%d",reason,retry);
             sc_memory_log();
-            vTaskDelay(pdMS_TO_TICKS(retry_s*1000));
-            if(retry_s<300) retry_s=retry_s*2>300?300:retry_s*2;
+            if(retry) {
+                /* Keep the job alive during backoff without keeping HTTP/TLS buffers. */
+                for(unsigned elapsed=0;elapsed<retry_s;elapsed++) {
+                    if(elapsed && elapsed%10==0) sc_status_error(&request,"RECOVERING",0,reason);
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                }
+                if(retry_s<300) retry_s=retry_s*2>300?300:retry_s*2;
+            }
         } else {
             static bool reported;
             if(!strcmp(state,"failed") && sc_network_ready() && !reported && sc_load_request(&request)==ESP_OK) {
-                sc_status(&request,"FAILED",0); reported=true;
-                sc_log("ERROR","OTA_BOOT_FAILED","Three candidate failures; waiting for a newer signed request");
+                char reason[96]; sc_failure_reason(reason,sizeof(reason));
+                sc_status_error(&request,"FAILED",0,reason); reported=true;
+                sc_log("ERROR","OTA_FAILED",reason);
             }
             vTaskDelay(pdMS_TO_TICKS(1000));
         }

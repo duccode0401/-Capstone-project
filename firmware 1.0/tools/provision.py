@@ -45,11 +45,18 @@ def main():
     if (not cfg["broker"].startswith("mqtts://") or not cfg["mqtt_user"] or not cfg["mqtt_password"]
             or any(c in cfg["broker"] for c in "\r\n\t @?#")):
         raise ValueError("Provision an authenticated TLS broker account for this device")
-    if "broker.hivemq.com" in cfg["broker"] or not trusted_url(cfg["trust_base"], cfg["trust_base"]):
+    from urllib.parse import urlsplit
+    broker = urlsplit(cfg["broker"])
+    host = (broker.hostname or "").lower().rstrip(".")
+    if (host == "broker.hivemq.com" or host.endswith(".broker.hivemq.com")
+            or not host or broker.path or broker.port == 0
+            or not trusted_url(cfg["trust_base"], cfg["trust_base"])):
         raise ValueError("Provision your own trusted broker and HTTPS firmware base")
     cfg.setdefault("key_hex", secrets.token_hex(32))
     if not re.fullmatch(r"[a-fA-F0-9]{64}", cfg["key_hex"]):
         raise ValueError("key_hex must contain 32 bytes in hex")
+    # Django validates lowercase hex in OTA_DEVICE_KEYS_JSON.
+    cfg["key_hex"] = cfg["key_hex"].lower()
     text = json.dumps(cfg, separators=(",", ":"), ensure_ascii=True)
     if len(text) >= 4096:
         raise ValueError("Configuration exceeds firmware bound")

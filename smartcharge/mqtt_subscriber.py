@@ -18,6 +18,7 @@ from django.utils import timezone
 
 from myapp.iot_services import process_device_log, process_telemetry
 from myapp.models import ChargerDevice, ChargingSession
+from myapp.mqtt_config import mqtt_connection
 from myapp.ota_services import expire_stale_ota_jobs, process_ota_status
 
 
@@ -108,13 +109,19 @@ def on_connect(client, userdata, connect_flags, reason_code, properties):
     )
 
 
+def on_subscribe(client, userdata, mid, reason_codes, properties):
+    denied = [topic for (topic, _), reason in zip(SUBSCRIPTIONS, reason_codes) if reason.is_failure]
+    if denied:
+        logger.error("Broker denied subscriptions: %s", ", ".join(denied))
+
+
 def on_disconnect(client, userdata, disconnect_flags, reason_code, properties):
     logger.warning("MQTT disconnected: reason=%s; client will reconnect", reason_code)
 
 
 def _dispatch(topic, data):
     if topic == MQTT_TOPIC_STATUS:
-        if data.get("status") != "DONE":
+        if not isinstance(data, dict) or data.get("status") != "DONE":
             raise ValidationError("Unsupported charging status message.")
         return mark_session_done(data.get("device"), data.get("port"))
     if topic == MQTT_TOPIC_TELEMETRY:
@@ -127,6 +134,10 @@ def _dispatch(topic, data):
 
 
 def on_message(client, userdata, msg):
+    if getattr(msg, "retain", False) is True:
+        logger.warning("Ignoring retained MQTT message on %s", msg.topic)
+        return
+    close_old_connections()
     if len(msg.payload) > MAX_PAYLOAD_BYTES:
         logger.error("MQTT payload too large topic=%s bytes=%s", msg.topic, len(msg.payload))
         return
@@ -166,12 +177,16 @@ def _timeout_worker():
 
 def start_mqtt_subscriber():
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="smartcharge-backend")
-    if settings.MQTT_USERNAME and settings.MQTT_PASSWORD:
-        client.username_pw_set(settings.MQTT_USERNAME, settings.MQTT_PASSWORD)
+    try:
+        config = mqtt_connection()
+    except ValidationError as exc:
+        raise SystemExit(exc.messages[0]) from exc
+    client.username_pw_set(**config["auth"])
     client.on_connect = on_connect
+    client.on_subscribe = on_subscribe
     client.on_disconnect = on_disconnect
     client.on_message = on_message
-    client.tls_set()
+    client.tls_set_context(config["tls"])
     client.reconnect_delay_set(min_delay=1, max_delay=30)
     client.connect_async(MQTT_BROKER, MQTT_PORT, keepalive=60)
     threading.Thread(target=_timeout_worker, name="ota-timeouts", daemon=True).start()

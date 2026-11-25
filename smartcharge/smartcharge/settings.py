@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 from pathlib import Path
 import os
+from urllib.parse import urlsplit
 from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -28,7 +29,13 @@ SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "django-insecure-local-developm
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ["*"]
+FIRMWARE_HTTPS_BASE_URL = os.environ.get("FIRMWARE_HTTPS_BASE_URL", "").rstrip("/")
+OTA_PUBLIC_HOST = urlsplit(FIRMWARE_HTTPS_BASE_URL).hostname
+ALLOWED_HOSTS = ["localhost", "127.0.0.1", "[::1]"]
+CSRF_TRUSTED_ORIGINS = []
+if OTA_PUBLIC_HOST:
+    ALLOWED_HOSTS.append(OTA_PUBLIC_HOST)
+    CSRF_TRUSTED_ORIGINS.append(f"https://{urlsplit(FIRMWARE_HTTPS_BASE_URL).netloc}")
 
 
 # Application definition
@@ -44,6 +51,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    'myapp.middleware.FirmwareTunnelMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -121,11 +129,10 @@ USE_TZ = True
 STATIC_URL = 'static/'
 MEDIA_ROOT = BASE_DIR / "media-private"
 
-# OTA/monitoring. Firmware URLs are generated only from this trusted HTTPS base.
-FIRMWARE_HTTPS_BASE_URL = os.environ.get("FIRMWARE_HTTPS_BASE_URL", "").rstrip("/")
+# OTA/monitoring
 OTA_DEVICE_KEYS_JSON = os.environ.get("OTA_DEVICE_KEYS_JSON", "{}")
 OTA_DOWNLOAD_TTL_SECONDS = int(os.environ.get("OTA_DOWNLOAD_TTL_SECONDS", "7200"))
-OTA_STATUS_TIMEOUT_SECONDS = int(os.environ.get("OTA_STATUS_TIMEOUT_SECONDS", "300"))
+OTA_STATUS_TIMEOUT_SECONDS = int(os.environ.get("OTA_STATUS_TIMEOUT_SECONDS", "900"))
 DEVICE_STALE_SECONDS = int(os.environ.get("DEVICE_STALE_SECONDS", "30"))
 TELEMETRY_RETENTION_PER_DEVICE = int(
     os.environ.get("TELEMETRY_RETENTION_PER_DEVICE", "10000")
@@ -134,7 +141,7 @@ DEVICE_LOG_RETENTION_PER_DEVICE = int(
     os.environ.get("DEVICE_LOG_RETENTION_PER_DEVICE", "5000")
 )
 
-MQTT_BROKER = os.environ.get("MQTT_BROKER", "broker.hivemq.com")
+MQTT_BROKER = os.environ.get("MQTT_BROKER", "")
 MQTT_PORT = int(os.environ.get("MQTT_PORT", "8883"))
 MQTT_USERNAME = os.environ.get("MQTT_USERNAME", "")
 MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", "")
@@ -143,3 +150,17 @@ MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", "")
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# OTA capabilities are bearer tokens embedded in request paths.
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "filters": {"hide_firmware_url": {"()": "myapp.middleware.HideFirmwareURL"}},
+    "handlers": {"runserver": {"class": "logging.StreamHandler"}},
+    "loggers": {
+        "django.server": {
+            "handlers": ["runserver"], "filters": ["hide_firmware_url"], "propagate": False,
+        },
+        "django.request": {"filters": ["hide_firmware_url"]},
+    },
+}

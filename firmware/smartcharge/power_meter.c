@@ -4,6 +4,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 /* ===== ADC ===== */
 #include "esp_adc/adc_continuous.h"
@@ -99,7 +100,7 @@ static void adc_calibration_init(void)
 }
 
 /* ===== CALIB ZERO ===== */
-static void adc_calibrate_zero(void)
+static esp_err_t adc_calibrate_zero(void)
 {
     uint8_t buf[256];
     uint32_t len;
@@ -108,8 +109,10 @@ static void adc_calibrate_zero(void)
 
     ESP_LOGI(TAG, "CALIB CURRENT ZERO: ENSURE NO CURRENT THROUGH WCS1800");
 
+    int64_t deadline=esp_timer_get_time()+5000000LL;
     while (cnt_i < RMS_SAMPLES)
     {
+        if(esp_timer_get_time()>deadline) return ESP_ERR_TIMEOUT;
         if (adc_continuous_read(adc_handle, buf, sizeof(buf), &len, 100) != ESP_OK)
             continue;
 
@@ -117,7 +120,7 @@ static void adc_calibrate_zero(void)
         {
             adc_digi_output_data_t *p = (void *)&buf[i];
             int mv;
-            adc_cali_raw_to_voltage(adc_cali, p->type1.data, &mv);
+            if(adc_cali_raw_to_voltage(adc_cali, p->type1.data, &mv)!=ESP_OK) return ESP_FAIL;
 
             float v = mv / 1000.0f;
 
@@ -134,18 +137,24 @@ static void adc_calibrate_zero(void)
     V_ZERO = ZMPT_OFFSET_V;
 
     ESP_LOGI(TAG, "ZERO DONE: I_ZERO=%.4f  V_ZERO=%.4f", I_ZERO, V_ZERO);
+    return ESP_OK;
 }
 
 /* ===== DO RMS ===== */
-static void adc_measure_rms(float *irms, float *vrms)
+static esp_err_t adc_measure_rms(float *irms, float *vrms, float *power)
 {
     uint8_t buf[256];
     uint32_t len;
     float sum_i2 = 0, sum_v = 0, sum_v2 = 0;
     int ci = 0, cv = 0;
+    float latest_i=0, sum_pair_i=0, sum_pair_v=0, sum_iv=0;
+    int pairs=0;
+    bool have_i=false;
+    int64_t deadline=esp_timer_get_time()+3000000LL;
 
     while (ci < RMS_SAMPLES || cv < RMS_SAMPLES)
     {
+        if(esp_timer_get_time()>deadline) return ESP_ERR_TIMEOUT;
         if (adc_continuous_read(adc_handle, buf, sizeof(buf), &len, 100) != ESP_OK)
             continue;
 
@@ -153,13 +162,14 @@ static void adc_measure_rms(float *irms, float *vrms)
         {
             adc_digi_output_data_t *p = (void *)&buf[i];
             int mv;
-            adc_cali_raw_to_voltage(adc_cali, p->type1.data, &mv);
+            if(adc_cali_raw_to_voltage(adc_cali, p->type1.data, &mv)!=ESP_OK) return ESP_FAIL;
 
             float v = mv / 1000.0f;
 
             if (p->type1.channel == ADC_I_CH && ci < RMS_SAMPLES)
             {
                 float i_inst = (v - I_ZERO) / (WCS_SENS_V_A * NUM_TURNS);
+                latest_i=i_inst; have_i=true;
                 sum_i2 += i_inst * i_inst;
                 ci++;
             }
@@ -168,6 +178,10 @@ static void adc_measure_rms(float *irms, float *vrms)
                 // Remove the LM358 bias from each ADC sample before RMS.
                 float v_adc = mv / 1000.0f;
                 float vv = v_adc - V_ZERO;
+                if(have_i) {
+                    sum_pair_i+=latest_i; sum_pair_v+=vv; sum_iv+=latest_i*vv;
+                    pairs++; have_i=false;
+                }
                 sum_v += vv;
                 sum_v2 += vv * vv;
                 cv++;
@@ -190,6 +204,12 @@ static void adc_measure_rms(float *irms, float *vrms)
     float amplifier_output_rms = sqrtf(ac_mean_square);
     *vrms = (amplifier_output_rms / ZMPT_AMPLIFIER_GAIN) *
             ZMPT_GAIN * ZMPT_CALIBRATION_FACTOR;
+    if(!pairs) return ESP_ERR_INVALID_STATE;
+    /* AC covariance of paired I/V samples removes sensor DC offsets.
+     * Adjacent ADC channels have sampling skew: validate phase/gain against a meter. */
+    *power=*irms==0?0:fabsf(sum_iv/pairs-(sum_pair_i/pairs)*(sum_pair_v/pairs))*
+        (ZMPT_GAIN*ZMPT_CALIBRATION_FACTOR/ZMPT_AMPLIFIER_GAIN);
+    return ESP_OK;
 }
 
 /* ========================================================= */
@@ -200,16 +220,12 @@ esp_err_t power_meter_init(void)
 {
     adc_calibration_init();
     adc_continuous_init();
-    adc_calibrate_zero();
-    return ESP_OK;
+    return adc_calibrate_zero();
 }
 
 esp_err_t power_meter_get(power_meter_t *meter)
 {
     if (!meter) return ESP_ERR_INVALID_ARG;
 
-    adc_measure_rms(&meter->Irms, &meter->Vrms);
-    meter->P = meter->Irms * meter->Vrms;
-
-    return ESP_OK;
+    return adc_measure_rms(&meter->Irms, &meter->Vrms, &meter->P);
 }

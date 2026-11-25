@@ -1,0 +1,9 @@
+{
+  "device": "ESP32_001",
+  "ssid": "",
+  "password": "",
+  "broker": "",
+  "mqtt_user": "",
+  "mqtt_password": "",
+  "trust_base": "https://capillary-sled-monogamy.ngrok-free.dev/"
+}

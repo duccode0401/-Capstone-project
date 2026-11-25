@@ -1,114 +1,193 @@
-# Kết quả kiểm tra Recovery OTA / telemetry / logging
+﻿# Kết quả tích hợp Firmware 1.0 / Django local qua ngrok
 
-Ngày: 2026-11-16. Môi trường: Windows, ESP-IDF v5.5.1, esptool 4.12.0,
-ESP32, compiler Xtensa GCC 14.2.0. Đây là kiểm tra source/build/host;
-**không phải chứng nhận phần cứng hoặc bản production đã triển khai**.
+Ngày kiểm tra: **2026-11-21**. Chỉ sửa source trong `firmware 1.0/`.
+ESP-IDF v5.5.1, Xtensa GCC 14.2.0, esptool 4.12.0, Windows.
+Không sửa Django, không tự flash board và không publish lệnh OTA thật.
 
-## Artifacts đã build thành công
+## 1. Kết quả build/artifact
 
 | Artifact | Binary thực tế | Partition | Dư |
 |---|---:|---:|---:|
-| `build-smartcharge/smartcharge.bin` | 1,436,416 B | 3,080,192 B | 1,643,776 B |
-| `recovery/build-recovery/recovery.bin` | 910,192 B | 1,048,576 B | 138,384 B |
+| SmartCharge 1.0.0 | 1,437,120 B | 3,080,192 B | 1,643,072 B |
+| Recovery 1.0.0 | 913,200 B | 1,048,576 B | 135,376 B |
 
-Đã kiểm tra bằng `check_sizes.py --subtype ota_0/factory`, strict size guard
-và `esptool image_info`. Cả hai image có checksum và validation hash hợp lệ.
-SHA-256 của file binary trong lần kiểm tra này:
+Cả hai build PASS. `tools/verify_builds.py` PASS:
+
+- ESP32, configured flash 4MB, rollback bật, eFuse anti-rollback tắt.
+- Partition binaries giống hệt nhau, offset/alignment/size đúng, cuối flash 0x400000.
+- Recovery factory @0x10000, đúng 1 MiB; main ota_0 @0x110000, size 0x2F0000.
+- Subtype checks và strict size guards PASS; Recovery vượt 1 MiB sẽ fail build.
+- `esptool image_info`: checksum và validation hash hợp lệ cho cả hai image.
+- Flash args main @0x110000, Recovery @0x10000, không ghi main đè factory.
+- Recovery core biên dịch SC_RECOVERY=1; symbol audit không có ADC continuous,
+  power_meter, LVGL init/render, payment hoặc tích phân phiên sạc.
+- Không chỉnh source bootloader/partition table/SDK. Bảng partitions.csv giữ nguyên.
+- Build chạy được trong đường dẫn `firmware 1.0` có khoảng trắng; size target dùng VERBATIM.
+
+SHA-256 của artifacts trong lần kiểm tra này:
 
 ```text
-smartcharge.bin 547114a683e91a40bf1512b9ce39224e44fd87a6c996f07a73de35abd7362ed9
-recovery.bin   4743e8a8377ed4ad040925db7a5ea36d711b833497b373a17d900cce3e45f5b1
+smartcharge.bin f1e4743f30ec31d7bd8b99a35dbaa18d51bdf2ddac6efef742e8c717d0c8577e
+recovery.bin   ca3fb6fa23663c5310dd87c34642ac11d2a8ecccf7841f1511a590937b90bfce
 ```
 
-Hash có thể đổi khi rebuild do timestamp/build metadata, không dùng các giá trị
-ở tài liệu để xác thực một release khác; signer luôn tính từ binary phát hành.
+Rebuild có thể đổi hash vì metadata/timestamp. Server phải tính hash từ binary
+phát hành thực tế; không dùng hash trong tài liệu cho một bản build khác.
 
-`tools/verify_builds.py` PASS:
+Warning còn lại: API LVGL cũ bị deprecated trong screen layout được giữ nguyên;
+IDF default app check cảnh báo main không vừa factory, nhưng explicit check ota_0
+và strict guard đều PASS. Không đổi layout/API chỉ để xử lý warning trong task OTA.
 
-- Hai partition binary giống hệt nhau, đúng bảng yêu cầu và kết thúc ở 0x400000.
-- Các offset căn đúng, không overlap/overflow, đúng ESP32 / cấu hình 4MB.
-- Rollback bật, eFuse anti-rollback tắt ở cả hai cấu hình.
-- Flash args SmartCharge -> 0x110000, Recovery -> 0x10000.
-- Recovery compile core riêng với SC_RECOVERY=1.
-- Symbol audit Recovery không có power_meter, ADC continuous start, LVGL init/
-  render, payment handler hoặc tích phân phiên sạc.
-- Source bootloader chuẩn không bị sửa.
+## 2. Tests đã chạy
 
-IDF default size check có một warning dự kiến: SmartCharge không vừa factory.
-Hai binary có vai trò khác nhau; explicit subtype check và strict guard đều PASS.
-Recovery vượt factory sẽ làm build thất bại dù vẫn có thể vừa ota_0.
+```powershell
+python tools/verify_builds.py
+python -m unittest discover -s tests -v
+```
 
-## RAM static và giới hạn phép kiểm tra
+**21 tests PASS, không SKIP** trong ESP-IDF Python environment sau build:
 
-`idf.py size` và linker PASS:
+| Nhóm | Số test | Phạm vi thật sự |
+|---|---:|---|
+| Boot model | 4 | Mô hình factory/new/pending/valid; không chạy bootloader thật |
+| HTTP policy C | 6 | Biên dịch và chạy C production bằng native TinyCC 0.9.27 |
+| Protocol/reference | 7 | HMAC binding, schema, URL/chip/project và strict size guard |
+| Provision/signer | 1 | NVS generator thật 16 KiB và signer đọc binary main thật, TEST key |
+| Web contract | 3 | Đọc/đánh giá AST canonical và manifest thật của Web; không DB/import Django |
+
+HTTP C tests kiểm tra HTTP 200 hợp lệ, redirect/auth/404/429/5xx, MIME sai,
+HTML ngrok ngay cả HTTP 200, Content-Length âm/0/quá giới hạn, chunked/gzip,
+HTML giả MIME binary, prefix image và manifest. Đây là unit tests của guard C;
+không giả là test esp_http_client/TLS/flash trên ESP32.
+
+Native compiler portable được đặt trong `build-host/tcc/` (generated/ignored),
+không cài system-wide, không dùng để build firmware ESP32. Không có native compiler
+thì test C sẽ SKIP trên máy khác; chỉ báo đủ 21 PASS nếu log thật xác nhận không skip.
+
+## 3. Probe HTTPS thực tế
+
+```powershell
+python tools/probe_https.py --base https://capillary-sled-monogamy.ngrok-free.dev
+```
+
+Kết quả cuối phiên kiểm tra:
+
+- TLS certificate và hostname verification trên **máy PC**: PASS.
+- GET root và một manifest URL cố tình không có quyền: **HTTP 404**.
+- Body ngrok có **ERR_NGROK_3200**, Content-Type text/plain, Content-Length 83.
+- Probe trả exit code 1: endpoint offline, không được coi là integration PASS.
+- Chưa có manifest/bin được authorize thật để thử tải; không tạo OTAJob hoặc
+  publish MQTT, không ghi flash. Domain có thể thay trạng thái sau thời điểm probe.
+
+[Ngrok định nghĩa ERR_NGROK_3200 là endpoint offline](https://ngrok.com/docs/errors/err_ngrok_3200).
+Người vận hành Web cần bật đúng tunnel/domain/port trước khi chạy E2E.
+PC TLS PASS không chứng minh CA/heap/handshake trên ESP32; cần board test.
+
+Firmware gửi `ngrok-skip-browser-warning: 1`, `Accept-Encoding: identity`,
+Accept theo manifest/bin và User-Agent SmartCharge-OTA/1. Không tắt verify TLS
+hoặc hostname. Header bypass ngrok là cơ chế client được
+[ngrok hỗ trợ](https://ngrok.com/docs/pricing-limits/free-plan-limits), không thay thế auth.
+
+## 4. Những gì đã sửa
+
+| File | Thay đổi |
+|---|---|
+| components/sc_core/sc_update.c | Ngrok headers; status/MIME/encoding/length guards; prefix check trước erase/write; TLS/error diagnostics cố định; phân loại retry |
+| components/sc_core/sc_http_policy.c + include/sc_http_policy.h | Guard HTTP portable, allocation-free, native C tests dùng đúng source này |
+| components/sc_core/sc_core.c | Broker case-insensitive; URL authority/ASCII validation; pre-check replay; lưu reason lỗi terminal; giữ nguyên request ABI 584 B |
+| components/sc_core/sc_network.c | Status hỗ trợ error đã có ở Web; topics/QoS/queues/payment contract không đổi |
+| components/sc_core/include/sc_core.h + CMakeLists.txt | API nội bộ/helper mới và đăng ký C source, không đổi request struct/schema canonical |
+| recovery/main/recovery_main.c | Transient -> giữ pending/RECOVERING/backoff; hard error -> reason bền vững/FAILED; không gọi main ghi dở |
+| smartcharge/main.c | Check replay/version trước BUSY; QoS1 duplicate không gửi FAILED/BUSY làm hủy job đã nhận |
+| tools/provision.py | Broker URI/hostname validation, chặn public broker case variants, chuẩn hóa key lowercase phù hợp Django |
+| tools/ota_protocol.py | URL validation reference khớp runtime, không thay chuỗi HMAC |
+| tools/probe_https.py | Probe TLS/ngrok read-only, không log URL capability/token/body |
+| provision.ngrok.example.json | Device ESP32_001 + trust_base domain thật, không chứa broker credentials hoặc key |
+| tests/test_http_policy.py | Native C guard tests |
+| tests/test_web_contract.py | Đối chiếu trực tiếp AST Web, read-only |
+| cmake/artifact_checks.cmake | VERBATIM cho đường dẫn chứa khoảng trắng |
+| .gitignore | Bỏ generated host compiler/test outputs và log |
+| OTA_MQTT_PROTOCOL.md | Bổ sung ngrok/error/retry và liên kết hướng dẫn mới |
+| LOCAL_OTA_FLASH_GUIDE.md | Build, provision, đồng bộ key/broker, backup/USB, UART, telemetry, OTA và fault tests |
+| VALIDATION_RESULTS.md | Báo cáo kết quả thật và giới hạn hiện tại |
+
+Không hard-code domain trong C; không hard-code secrets; không đổi topic, device
+routing, HMAC canonical, seq-string, request_id, version/SHA/manifest fields.
+Trường error là optional field đã được parser Web đọc, không thêm topic/status mới.
+
+## 5. Bảo vệ chức năng trạm sạc và đo lường
+
+Đối chiếu byte với snapshot firmware 1.0 đã có trên Git:
+
+- partitions.csv: identical.
+- smartcharge/power_meter.c và power_meter.h: identical.
+- smartcharge/display_lvgl.c và screens/charge_test_screen.c: identical.
+- Các thân hàm handle_payment, update_energy và telemetry_task: identical.
+- GPIO LCD, ADC34/35, sample rate 20 kHz, gains/calibration/noise floor,
+  relay GPIO25 active-high và đơn giá không thay đổi trong patch này.
+
+Khác biệt đã có từ firmware cũ sang 1.0: cũ dùng P=Vrms*Irms, main nhân PF=0.9
+và Wh theo giả định vòng 1 giây; 1.0 dùng covariance mẫu I/V và monotonic dt.
+Lần tích hợp này không sửa lại thuật toán hoặc tự hiệu chuẩn. Chưa chứng minh
+P/Wh tương đương board/firmware cũ; nếu cần thay phải tách task/test đo lường riêng.
+Đơn giá vẫn 0.9 Wh/10,000 VND, không đổi thành 130 Wh theo comment cũ.
+
+Đây là bằng chứng không thay source liên quan, **không phải regression PASS trên board**.
+
+## 6. RAM và FreeRTOS
+
+IDF size và linker PASS:
 
 | Ứng dụng | Static DRAM | IRAM |
 |---|---:|---:|
 | SmartCharge | 114,020 B | 111,439 B |
 | Recovery | 36,296 B | 90,563 B |
 
-Đây không phải free heap lúc chạy. Đã cấu hình main stack 8192 B, MQTT stack
-6144 B, network/telemetry stack 4096 B, LVGL stack 8192 B; queues/outbox có giới
-hạn. Recovery dùng TLS buffers 4096 B và streaming image buffer 1024 B.
-**Chưa đo peak heap và stack watermark trên firmware mới**, nhất là TLS handshake
-MQTT + HTTPS đồng thời trong Recovery. Log RAM cũ của người dùng không chứng minh
-bản firmware mới còn đủ heap. Cần chạy MEM diagnostics trên board trước triển khai.
+Không được gọi số DRAM dư từ linker là free heap runtime. Chưa đo heap free/min/
+largest block và stack watermark trên firmware mới, đặc biệt MQTT TLS + HTTPS.
+Các log MEM và watermark main/network/telemetry/LVGL hiện có được giữ nguyên.
+Không tăng buffer image vượt 1024 B; manifest tối đa 2048 B. Không chạy HTTP server,
+không ADC/LVGL trong Recovery; queues/outbox vẫn giới hạn như trước.
 
-## Tests host đã chạy
+## 7. Điểm phối hợp với AI Web, chưa tự sửa Django
 
-```powershell
-python -m unittest discover -s tests -v
-```
+Đã đọc lại source Web local mới nhất sau khi nó thay đổi trong phiên làm việc:
 
-**12 tests PASS** trong ESP-IDF Python environment:
+1. Canonical command hiện nằm ở prepare_ota và manifest ở build_manifest, đều
+   khớp byte với firmware reference; seq vẫn JSON string, không newline cuối.
+2. process_ota_status đã cho phép RECOVERING và reset tiến độ khi tải lại. Tuy
+   nhiên nhánh recovery_failure còn đổi FAILED thành RECOVERING để tương thích
+   firmware cũ. Bản mới chỉ gửi FAILED cho lỗi cứng/boot validation cạn retry và
+   có error cụ thể; AI Web cần nhận biết terminal failure để đóng job đúng lúc.
+3. Duplicate status/progress giống hệt return trước khi refresh last_status_at.
+   Heartbeat RECOVERING giống nhau có thể không giữ timeout; cần sửa phía Web.
+4. authorize_job_token/expire_stale_ota_jobs vẫn thu hồi theo terminal state/TTL/
+   timeout. Nếu offline lâu hơn giới hạn, NVS pending không khôi phục được URL
+   đã hết quyền. Web phải có renewal/reissue hoặc operator cấp job mới. Firmware
+   không tự tạo token/HMAC URL hoặc vượt quyền server.
+5. Tài liệu Web vẫn nói progress không được đi lùi dù code cho phép retry reset;
+   AI Web cần đồng bộ tài liệu. Tên topic/canonical/schema không cần đổi.
 
-- Server reference: command MAC, thay device/seq/version/request làm đổi MAC,
-  manifest hash/size/version binding, domain separation, URL không tin cậy,
-  wrong-chip/wrong-project image bị signer từ chối.
-- Strict size guard từ chối binary bằng hoặc vượt giới hạn.
-- Provisioning tool gọi NVS generator thật, tạo NVS 16 KiB bằng TEST credentials;
-  signer đọc binary SmartCharge thật và tạo command/manifest MAC hợp lệ.
-- Bốn **model tests** về lựa chọn factory/candidate/pending/valid.
+Handoff chi tiết, vị trí hàm và cách xử lý lỗi có trong LOCAL_OTA_FLASH_GUIDE.md.
+Không có file Django nào được sửa bởi các thao tác firmware trong nhiệm vụ này.
 
-Các test Python không chạy C parser/MQTT callbacks/bootloader thật; không được
-gọi là end-to-end test lệnh sai device, chống replay bền vững hay power-cut test.
-Mã nguồn IDF được đối chiếu cho hành vi otadata, nhưng model không chứng minh
-tính nguyên tử của flash trên phần cứng.
+## 8. Những kiểm tra CHƯA THỰC HIỆN
 
-## Chưa chạy: cần board, tải kiểm tra và server đã provision
-
-| Trường hợp yêu cầu | Trạng thái |
+| Kiểm tra | Trạng thái |
 |---|---|
-| Telemetry MQTT mỗi 10 giây trên board | CHƯA CHẠY |
-| ADC/LVGL/Wi-Fi/MQTT regression trên board | CHƯA CHẠY |
-| Payment -> relay ON -> CHARGING -> relay OFF -> DONE | CHƯA CHẠY |
-| Wrong device / duplicate / replay sau reset trên C firmware | CHƯA CHẠY |
-| OTA khi đang sạc -> REJECTED_BUSY, giữ phiên sạc | CHƯA CHẠY |
-| HTTPS cert/hash/size/chip/version/image lỗi trên thiết bị | CHƯA CHẠY |
-| Cắt nguồn vật lý ở 10/50/90% và các điểm commit | CHƯA CHẠY |
-| Corrupt ota_0 -> boot Recovery | CHƯA CHẠY |
-| Candidate lỗi -> watchdog/rollback -> Recovery | CHƯA CHẠY |
-| Candidate khỏe -> main xác nhận SUCCESS đúng version | CHƯA CHẠY |
-| GPIO25 không có xung bật trong ROM/bootloader/reset | CHƯA ĐO |
-| So P/Wh với đồng hồ chuẩn, tải có PF khác nhau | CHƯA ĐO |
+| ESP32 TLS với ngrok và broker riêng | CHƯA CHẠY: thiếu kết nối board/credentials và tunnel đang offline |
+| Telemetry MQTT 10 giây/logs thực tế | CHƯA CHẠY |
+| ADC/LVGL/payment/relay/DONE trên board | CHƯA CHẠY |
+| HMAC sai device/seq/replay/busy trên C firmware đang chạy | CHƯA CHẠY; host tests không thay thế |
+| Cắt nguồn 10/50/90%, trước/sau commit | CHƯA CHẠY; boot model không phải power-cut PASS |
+| Mất Wi-Fi giữa tải, certificate/hash/file lỗi trên board | CHƯA CHẠY |
+| Main crash/watchdog trước health -> Recovery | CHƯA CHẠY |
+| Main mới boot khỏe và report SUCCESS đúng version | CHƯA CHẠY |
+| GPIO25 không có xung bật trong ROM/reset | CHƯA ĐO; cần pulldown ngoài và ngắt tải |
+| Heap/stack dưới tải TLS và hiệu chuẩn P/Wh | CHƯA ĐO |
 
-Chưa nạp firmware mới vào board, chưa thay cấu hình/secret production và chưa
-push thay đổi này lên GitHub. Không có domain firmware, tài khoản broker riêng,
-khóa riêng thiết bị hoặc kết nối test board được cung cấp để làm E2E.
-Quy trình test chi tiết và UART migration ở `OTA_MQTT_PROTOCOL.md`.
-
-## Giới hạn cần giữ rõ
-
-- Dùng manifest HMAC-SHA256 với secret riêng thiết bị + verified HTTPS, không
-  phải chữ ký bất đối xứng/secure boot. NVS hiện chưa mã hóa; chưa chống physical attacker.
-- Chỉ có một main slot: rollback là về **Recovery**, không có main cũ dự phòng.
-- App PENDING_VERIFY lỗi sẽ bị bootloader loại; app đã VALID không tự rollback
-  chỉ vì crash. Boot counter xử lý các lần chưa đạt healthy, không bảo đảm lỗi
-  lặp sau healthy hoặc trước app_main. Xem phần giới hạn boot validation trong protocol.
-- Phần mềm giữ relay OFF từ app_main; cần pulldown phần cứng để bảo đảm cả ROM/reset.
-- Giữ nguyên giá cũ 10,000 VND -> 0.9 Wh, không tự đổi sang 130 Wh vì chưa xác nhận.
-- Đã thay PF cố định bằng covariance mẫu đo; gain/pha cảm biến và sai lệch ADC
-  multiplex phải được hiệu chuẩn trước dùng tính tiền.
-- Event/telemetry queues không phải durable ledger. Reboot có thể mất log/DONE
-  đang chờ; phiên sạc không tự khôi phục sau mất điện. Không thay đổi nghiệp vụ
-  thanh toán sang một giao thức mới khi chưa được yêu cầu.
+Trước flash: ngắt tải vật lý, chắc chắn relay OFF, backup flash; làm theo
+LOCAL_OTA_FLASH_GUIDE.md. Không bật phiên sạc cũ sau reset. App đã VALID không tự
+rollback chỉ vì watchdog; boot counter có giới hạn được mô tả trong protocol.
+Firmware dùng HMAC manifest + verified HTTPS, chưa có secure boot/NVS encryption
+để chống kẻ đọc/ghi flash vật lý. Không tuyên bố production-ready/E2E PASS.

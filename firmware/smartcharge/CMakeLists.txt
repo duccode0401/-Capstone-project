@@ -12,6 +12,7 @@ idf_component_register(
         "."
         "screens"
     REQUIRES
+        sc_core
         mqtt
         lvgl__lvgl
     PRIV_REQUIRES
@@ -21,6 +22,9 @@ idf_component_register(
         esp_driver_spi
         esp_lcd
         esp_timer
+        spi_flash
+        app_update
+        esp_system
         esp_wifi
         esp_event
         esp_netif
