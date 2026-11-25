@@ -64,7 +64,7 @@ class PaymentIdempotencyTests(TestCase):
         response.json.return_value = {"transactions": [{"id": transaction_id}]}
         return response
 
-    @patch("myapp.views.mqtt_publish.single")
+    @patch("myapp.views.publish_once")
     @patch("myapp.views.requests.get")
     def test_successful_payment_creates_one_session(self, request_get, mqtt_single):
         request_get.return_value = self.sepay_response()
@@ -78,7 +78,7 @@ class PaymentIdempotencyTests(TestCase):
         self.assertEqual(session.status, "assigned")
         mqtt_single.assert_called_once()
 
-    @patch("myapp.views.mqtt_publish.single")
+    @patch("myapp.views.publish_once")
     @patch("myapp.views.requests.get")
     def test_repeated_poll_returns_same_session_without_duplicate_start(
         self, request_get, mqtt_single
@@ -113,7 +113,7 @@ class PaymentIdempotencyTests(TestCase):
                 sepay_transaction_id="tx-unique",
             )
 
-    @patch("myapp.views.mqtt_publish.single")
+    @patch("myapp.views.publish_once")
     @patch("myapp.views.requests.get")
     def test_each_transaction_in_one_sepay_response_is_processed_once(
         self, request_get, mqtt_single
@@ -138,7 +138,7 @@ class PaymentIdempotencyTests(TestCase):
         )
         mqtt_single.assert_called_once()
 
-    @patch("myapp.views.mqtt_publish.single")
+    @patch("myapp.views.publish_once")
     @patch("myapp.views.requests.get")
     def test_no_port_leaves_session_waiting_and_does_not_publish(
         self, request_get, mqtt_single
@@ -251,7 +251,7 @@ class ConcurrentPaymentTests(TransactionTestCase):
 
 class MigrationPreservesSessionsTests(TransactionTestCase):
     migrate_from = ("myapp", "0004_alter_chargingsession_status")
-    migrate_to = ("myapp", "0007_otajob_one_active_ota_job_per_device")
+    migrate_to = ("myapp", "0010_charging_start_delivery")
 
     def test_existing_session_survives_migration(self):
         executor = MigrationExecutor(connection)
@@ -672,7 +672,7 @@ class PublicMqttTests(TestCase):
             mqtt_connection()
         with self.assertRaisesMessage(ValidationError, "OTA is disabled"):
             create_and_issue_ota(None, None, Mock())
-        with patch("myapp.views.mqtt_publish.single") as publish:
+        with patch("myapp.views.publish_once") as publish:
             self.assertFalse(publish_start_once(None))
             publish.assert_not_called()
         with patch("myapp.views.requests.get") as payment_api:

@@ -19,6 +19,7 @@ from django.utils import timezone
 from myapp.iot_services import process_device_log, process_telemetry
 from myapp.models import ChargerDevice, ChargingSession
 from myapp.mqtt_config import mqtt_connection, public_test_topics
+from myapp.sepay import dispatch_paid_orders
 from myapp.ota_services import expire_stale_ota_jobs, process_ota_status
 
 
@@ -49,6 +50,7 @@ PUBLIC_TEST_EVENTS = {
 }
 PUBLIC_MEASUREMENTS = (
     "voltage_v", "current_a", "power_w", "energy_total_wh", "energy_delta_wh", "interval_s",
+    "heap_free_bytes", "rssi_dbm",
 )
 ACTIVE_STATUSES = ("assigned", "charging")
 MAX_PAYLOAD_BYTES = 4096
@@ -144,11 +146,13 @@ def on_disconnect(client, userdata, disconnect_flags, reason_code, properties):
 
 def _dispatch_public_test(topic, data):
     telemetry, logs = public_test_topics()
-    device = settings.MQTT_PUBLIC_TEST_DEVICE
+    device = settings.MQTT_PUBLIC_TEST_DEVICE or settings.MQTT_DEVICE_ID
     if not isinstance(data, dict) or data.get("device") != device:
         raise ValidationError("Unexpected MQTT test device.")
     if topic == telemetry and data.get("charging") is False and data.get("status") == "IDLE":
         sample = {key: data.get(key) for key in PUBLIC_MEASUREMENTS}
+        if "firmware_version" in data:
+            sample["firmware_version"] = data["firmware_version"]
         return process_telemetry(dict(sample, device=device, port=1, charging=False, status="IDLE"))
     if topic == logs:
         event = data.get("event")
@@ -218,6 +222,12 @@ def _timeout_worker():
                 logger.warning("Marked %s OTA job(s) failed by timeout", expired)
         except Exception:
             logger.exception("OTA timeout worker failed")
+        finally:
+            close_old_connections()
+        try:
+            dispatch_paid_orders()
+        except (DatabaseError, ValidationError):
+            logger.warning("Could not dispatch verified SePay orders.")
         finally:
             close_old_connections()
         time.sleep(30)

@@ -51,6 +51,7 @@ class ChargingSession(models.Model):
         max_length=100, null=True, blank=True, unique=True
     )
     mqtt_start_sent_at = models.DateTimeField(null=True, blank=True)
+    mqtt_start_delivery_unknown = models.BooleanField(default=False)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -76,6 +77,16 @@ class ChargerPort(models.Model):
 
     def __str__(self):
         return f"{self.device.device_id} - Port {self.port_no}"
+
+
+class PaymentOrder(models.Model):
+    code = models.CharField(max_length=20, unique=True)
+    port = models.ForeignKey(ChargerPort, on_delete=models.PROTECT)
+    amount_vnd = models.PositiveIntegerField()
+    expires_at = models.DateTimeField()
+    session = models.OneToOneField(
+        ChargingSession, null=True, blank=True, on_delete=models.PROTECT,
+    )
 
 
 class FirmwareArtifact(models.Model):
@@ -231,6 +242,9 @@ class DeviceTelemetry(models.Model):
     energy_delta_wh = models.FloatField()
     charging = models.BooleanField()
     charging_status = models.CharField(max_length=24)
+    heap_free_bytes = models.PositiveIntegerField(null=True, blank=True)
+    rssi_dbm = models.SmallIntegerField(null=True, blank=True)
+    firmware_version = models.CharField(max_length=31, blank=True)
     timestamp = models.DateTimeField(default=timezone.now)
     received_at = models.DateTimeField(auto_now_add=True)
 

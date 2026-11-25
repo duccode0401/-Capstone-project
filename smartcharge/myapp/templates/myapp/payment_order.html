@@ -1,0 +1,50 @@
+{% load static %}
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Thanh toán SmartCharge</title>
+  <link rel="stylesheet" href="{% static 'css/payment.css' %}">
+  {% if refresh %}
+    <meta http-equiv="refresh" content="5">
+  {% endif %}
+</head>
+<body>
+<main class="container">
+  <h1 class="title">Thanh toán SmartCharge</h1>
+  {% if order %}
+    <p>{{ order.port.device.device_id }}, cổng {{ order.port.port_no }} · {{ order.amount_vnd }} VND</p>
+    {% if order.session %}
+      <p>{{ order.session.get_status_display }}</p>
+      {% if order.session.mqtt_start_delivery_unknown and order.session.status == 'assigned' %}
+        <p>Chưa xác nhận trạm đã nhận lệnh. Liên hệ quản trị viên với mã {{ order.code }}.</p>
+      {% endif %}
+    {% elif qr_url %}
+      <img class="qr-img" src="{{ qr_url }}" alt="Mã QR thanh toán">
+      <p>Nội dung chuyển khoản <strong>{{ order.code }}</strong></p>
+    {% else %}
+      <p>Mã thanh toán đã hết hạn.</p>
+    {% endif %}
+    <p><a href="{% url 'myapp:payment_order' %}">Tạo đơn mới</a></p>
+  {% else %}
+    <form method="post">
+      {% csrf_token %}
+      <label for="port">Cổng sạc</label>
+      <select name="port" id="port" required>
+        {% for port in ports %}
+          <option value="{{ port.pk }}">{{ port.device.device_id }} · Cổng {{ port.port_no }}</option>
+        {% empty %}
+          <option value="">Chưa có cổng sạc</option>
+        {% endfor %}
+      </select>
+      <label for="amount">Số tiền (VND)</label>
+      <select name="amount" id="amount" required>
+        {% for amount in amounts %}<option value="{{ amount }}">{{ amount }}</option>{% endfor %}
+      </select>
+      <button type="submit" {% if not ports %}disabled{% endif %}>Tạo mã QR</button>
+    </form>
+  {% endif %}
+</main>
+</body>
+</html>

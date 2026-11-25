@@ -14,8 +14,10 @@ PUBLIC_TEST_PORT = 8883
 
 def public_test_topics():
     device = settings.MQTT_PUBLIC_TEST_DEVICE
+    if not device:
+        return ("iot/charge_station/v1/telemetry", "iot/charge_station/v1/logs")
     if not re.fullmatch(r"SC_TEST_[a-f0-9]{16}", device):
-        raise ValidationError("Set MQTT_PUBLIC_TEST_DEVICE to the alias printed by provisioning.")
+        raise ValidationError("MQTT_PUBLIC_TEST_DEVICE must be a provisioning alias when set.")
     base = f"iot/charge_station/test/{device}"
     return f"{base}/telemetry", f"{base}/logs"
 
