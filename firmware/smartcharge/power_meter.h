@@ -8,7 +8,7 @@ typedef struct
 {
     float Irms;     // A
     float Vrms;     // V
-    float P;        // W: AC real power from adjacent calibrated I/V sample covariance
+    float P;        // W
 } power_meter_t;
 
 /* ===== API PUBLIC ===== */

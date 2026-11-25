@@ -4,9 +4,3 @@
 /sdkconfig.old
 /sdkconfig
 /.vscode/
-/build-smartcharge/
-/recovery/build-recovery/
-/sdkconfig.ota*
-/recovery/sdkconfig.recovery*
-/provisioning/
-__pycache__/

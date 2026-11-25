@@ -1,8 +1,6 @@
 #pragma once
 
 #include "esp_err.h"
-#include <stdbool.h>
-bool display_is_healthy(void);
 
 esp_err_t display_lvgl_init(void);
 

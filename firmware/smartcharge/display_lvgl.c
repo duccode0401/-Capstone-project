@@ -1,7 +1,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdatomic.h>
 
 #include "driver/gpio.h"
 #include "driver/ledc.h"
@@ -20,7 +19,6 @@
 
 #include "charge_test_screen.h"
 #include "display_lvgl.h"
-#include "esp_log.h"
 
 #define LCD_HOST VSPI_HOST
 #define PIN_NUM_SCLK 18
@@ -49,11 +47,6 @@
 static esp_lcd_panel_io_handle_t io_handle;
 static esp_lcd_panel_handle_t lcd_panel_handle;
 static _lock_t lvgl_api_lock;
-static atomic_uint_fast32_t render_tick_ms;
-bool display_is_healthy(void)
-{
-    return (uint32_t)(esp_timer_get_time()/1000)-atomic_load(&render_tick_ms)<2000;
-}
 
 static void display_init(void);
 static void lvgl_task(void *arg);
@@ -172,16 +165,10 @@ static void lvgl_tick(void *arg)
 static void lvgl_task(void *arg)
 {
     uint32_t wait_ms;
-    int64_t last_stack_log=0;
     while (1) {
         _lock_acquire(&lvgl_api_lock);
         wait_ms = lv_timer_handler();
         _lock_release(&lvgl_api_lock);
-        atomic_store(&render_tick_ms,(uint32_t)(esp_timer_get_time()/1000));
-        if(esp_timer_get_time()-last_stack_log>=10000000LL) {
-            ESP_LOGI("MEM","task=lvgl stack_watermark=%u B",(unsigned)uxTaskGetStackHighWaterMark(NULL));
-            last_stack_log=esp_timer_get_time();
-        }
         // LV_NO_TIMER_READY may be UINT32_MAX. Poll regularly so changes
         // made by the measurement task are rendered even without UI timers.
         vTaskDelay(pdMS_TO_TICKS(MIN(MAX(wait_ms, 10), 50)));
@@ -222,7 +209,7 @@ esp_err_t display_lvgl_init(void)
 
     // Screen construction and rendering use large LVGL call stacks; reserve
     // enough stack for font measurement and widget style setup.
-    if(xTaskCreate(lvgl_task, "lvgl", 8192, NULL, 2, NULL)!=pdPASS) return ESP_ERR_NO_MEM;
+    xTaskCreate(lvgl_task, "lvgl", 8192, NULL, 2, NULL);
     return ESP_OK;
 }
 
