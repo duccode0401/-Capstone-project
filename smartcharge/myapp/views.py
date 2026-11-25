@@ -236,12 +236,12 @@ def payment_view(request):
 
 
 def payment_baseline(request):
-    if settings.MQTT_PUBLIC_TEST_MODE:
-        return JsonResponse({"error": "Payment is disabled in public test mode."}, status=403)
     """
     Lấy 'mốc' giao dịch mới nhất hiện có cho số tiền đó.
     Frontend sẽ dùng baseline_id này để chỉ check giao dịch mới hơn.
     """
+    if settings.MQTT_PUBLIC_TEST_MODE:
+        return JsonResponse({"error": "Payment is disabled in public test mode."}, status=403)
     try:
         amount = float(request.GET.get("amount", "0"))
     except ValueError:

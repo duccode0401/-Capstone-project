@@ -61,5 +61,3 @@ python manage.py check
 python manage.py makemigrations --check --dry-run
 python manage.py test
 ```
-
-[Hướng dẫn chạy ESP32 và Django với EMQX Public Broker](../firmware%201.0/PUBLIC_MQTT_TEST.md)

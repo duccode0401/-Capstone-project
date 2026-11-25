@@ -205,6 +205,8 @@ def on_message(client, userdata, msg):
         logger.exception("Database error processing MQTT topic=%s", msg.topic)
     except Exception:
         logger.exception("Unexpected error processing MQTT topic=%s", msg.topic)
+    finally:
+        close_old_connections()
 
 
 def _timeout_worker():
