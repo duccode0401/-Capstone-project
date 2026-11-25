@@ -12,7 +12,7 @@ load_dotenv(settings.BASE_DIR / ".env")
 from datetime import timedelta
 
 from django.http import FileResponse, Http404, JsonResponse, StreamingHttpResponse
-from django.shortcuts import render
+from django.shortcuts import redirect, render
 from django.core.exceptions import PermissionDenied
 from django.core.paginator import Paginator
 from django.contrib.auth.decorators import permission_required
@@ -180,6 +180,8 @@ def create_session_after_payment(amount_vnd: int, sepay_transaction_id):
 
 def publish_start_once(session: ChargingSession):
     """Gửi START tối đa một lần sau khi session đã được gán hợp lệ."""
+    if settings.MQTT_PUBLIC_TEST_MODE:
+        return False
     with transaction.atomic():
         session = (
             ChargingSession.objects.select_related("device").get(pk=session.pk)
@@ -218,7 +220,6 @@ def publish_start_once(session: ChargingSession):
         ).update(mqtt_start_sent_at=None)
         raise
 
-    print("MQTT START sent:", MQTT_TOPIC_ORDER, payload)
     return True
 
 
@@ -229,10 +230,14 @@ SEPAY_API_URL = "https://my.sepay.vn/userapi/transactions/list"
 
 
 def payment_view(request):
+    if settings.MQTT_PUBLIC_TEST_MODE:
+        return redirect("myapp:devices_dashboard")
     return render(request, "myapp/base.html")
 
 
 def payment_baseline(request):
+    if settings.MQTT_PUBLIC_TEST_MODE:
+        return JsonResponse({"error": "Payment is disabled in public test mode."}, status=403)
     """
     Lấy 'mốc' giao dịch mới nhất hiện có cho số tiền đó.
     Frontend sẽ dùng baseline_id này để chỉ check giao dịch mới hơn.
@@ -284,6 +289,8 @@ def check_payment(request):
         } hoặc null
     }
     """
+    if settings.MQTT_PUBLIC_TEST_MODE:
+        return JsonResponse({"error": "Payment is disabled in public test mode."}, status=403)
     try:
         # luôn ép về int VND cho chắc
         amount = int(float(request.GET.get("amount", "0")))

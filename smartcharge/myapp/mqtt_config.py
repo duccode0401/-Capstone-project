@@ -8,11 +8,36 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 
 
-def mqtt_connection():
+PUBLIC_TEST_HOST = "broker.emqx.io"
+PUBLIC_TEST_PORT = 8883
+
+
+def public_test_topics():
+    device = settings.MQTT_PUBLIC_TEST_DEVICE
+    if not re.fullmatch(r"SC_TEST_[a-f0-9]{16}", device):
+        raise ValidationError("Set MQTT_PUBLIC_TEST_DEVICE to the alias printed by provisioning.")
+    base = f"iot/charge_station/test/{device}"
+    return f"{base}/telemetry", f"{base}/logs"
+
+
+def mqtt_connection(*, subscribe_only=False):
+    if settings.MQTT_PUBLIC_TEST_MODE:
+        if not subscribe_only:
+            raise ValidationError("MQTT publishing is disabled in public test mode.")
+        public_test_topics()
+        return {
+            "hostname": PUBLIC_TEST_HOST,
+            "port": PUBLIC_TEST_PORT,
+            "auth": None,
+            "tls": ssl.create_default_context(),
+        }
+
     host = settings.MQTT_BROKER
+    normalized_host = host.lower().rstrip(".")
+    public_hosts = ("broker.hivemq.com", PUBLIC_TEST_HOST)
     if (
         not re.fullmatch(r"[A-Za-z0-9.-]+", host)
-        or "broker.hivemq.com" in host.lower()
+        or any(normalized_host == public or normalized_host.endswith("." + public) for public in public_hosts)
         or not 1 <= settings.MQTT_PORT <= 65535
         or not settings.MQTT_USERNAME.strip()
         or not settings.MQTT_PASSWORD

@@ -61,6 +61,8 @@ def _signature(key, canonical):
 
 
 def validate_device_ready_for_ota(device, firmware, now=None, *, issuing_job=None):
+    if settings.MQTT_PUBLIC_TEST_MODE:
+        raise ValidationError("OTA is disabled in public test mode.")
     now = now or timezone.now()
     if not DEVICE_ID_PATTERN.fullmatch(device.device_id):
         raise ValidationError("Device ID không hợp lệ.")
@@ -108,6 +110,9 @@ def validate_device_ready_for_ota(device, firmware, now=None, *, issuing_job=Non
 def prepare_ota(device, firmware, user):
     if not user or not user.has_perm("myapp.deploy_firmware"):
         raise PermissionDenied("Tài khoản không có quyền deploy firmware.")
+
+    if settings.MQTT_PUBLIC_TEST_MODE:
+        raise ValidationError("OTA is disabled in public test mode.")
 
     now = timezone.now()
     base_url = _https_base_url()
@@ -194,6 +199,8 @@ def _probe_https_release(job, command):
 
 def publish_ota(job, command):
     try:
+        if settings.MQTT_PUBLIC_TEST_MODE:
+            raise ValidationError("OTA is disabled in public test mode.")
         _probe_https_release(job, command)
         job.refresh_from_db()
         if job.is_terminal:
@@ -238,6 +245,8 @@ def create_and_issue_ota(device, firmware, user):
 
 
 def authorize_job_token(request_id, raw_token):
+    if settings.MQTT_PUBLIC_TEST_MODE:
+        raise PermissionDenied("OTA is disabled in public test mode.")
     try:
         job = OTAJob.objects.select_related("device", "firmware").get(
             request_id=request_id

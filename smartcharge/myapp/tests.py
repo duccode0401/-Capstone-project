@@ -23,6 +23,7 @@ from django.utils import timezone
 from mqtt_subscriber import (
     MQTT_TOPIC_LOGS,
     MQTT_TOPIC_OTA_STATUS,
+    MQTT_TOPIC_STATUS,
     MQTT_TOPIC_TELEMETRY,
     mark_session_done,
     on_connect,
@@ -30,6 +31,7 @@ from mqtt_subscriber import (
 )
 
 from .iot_services import process_device_log, process_telemetry
+from .mqtt_config import mqtt_connection, public_test_topics
 from .models import (
     ChargerDevice,
     ChargerPort,
@@ -40,7 +42,7 @@ from .models import (
     OTAJob,
 )
 from .ota_services import _probe_https_release, create_and_issue_ota, process_ota_status
-from .views import create_session_after_payment
+from .views import create_session_after_payment, publish_start_once
 
 
 MQTT_TEST_SETTINGS = {
@@ -614,3 +616,70 @@ class IoTMessageTests(TestCase):
         self.assertIn(MQTT_TOPIC_TELEMETRY, topics)
         self.assertIn(MQTT_TOPIC_LOGS, topics)
         self.assertIn(MQTT_TOPIC_OTA_STATUS, topics)
+
+@override_settings(
+    MQTT_PUBLIC_TEST_MODE=True,
+    MQTT_PUBLIC_TEST_DEVICE="SC_TEST_0123456789abcdef",
+    MQTT_USERNAME="private-user",
+    MQTT_PASSWORD="private-password",
+    OTA_DEVICE_KEYS_JSON="{}",
+)
+class PublicMqttTests(TestCase):
+    def test_subscriber_receives_only_bench_data_and_displays_it(self):
+        from types import SimpleNamespace
+
+        telemetry, logs = public_test_topics()
+        mqtt_client = Mock()
+        mqtt_client.subscribe.return_value = (0, 1)
+        on_connect(mqtt_client, None, None, 0, None)
+        mqtt_client.subscribe.assert_called_once_with([(telemetry, 0), (logs, 0)])
+
+        def receive(topic, retained=False, **data):
+            on_message(None, None, SimpleNamespace(
+                topic=topic, payload=json.dumps(data).encode(), retain=retained,
+            ))
+
+        alias = "SC_TEST_0123456789abcdef"
+        receive(MQTT_TOPIC_OTA_STATUS, device=alias, status="SUCCESS")
+        receive(MQTT_TOPIC_STATUS, device=alias, status="DONE")
+        receive(logs, device="another-device", event="HEALTHY")
+        receive(logs, device=alias, event="HEALTHY", retained=True)
+        receive(logs, device=alias, event="PAYMENT_RECEIVED")
+        self.assertFalse(ChargerDevice.objects.exists())
+        receive(logs, device=alias, event="HEALTHY", message="untrusted free text", uptime_ms=30000)
+        receive(telemetry, device=alias, port=1, charging=False, status="IDLE",
+                voltage_v=0.12, current_a=0, power_w=0, energy_total_wh=0,
+                energy_delta_wh=0, interval_s=10)
+        self.assertEqual(DeviceLog.objects.get().message, "Application startup health checks passed")
+        self.assertEqual(DeviceTelemetry.objects.get().voltage_v, 0.12)
+        self.assertFalse(OTAJob.objects.exists())
+        self.assertFalse(ChargingSession.objects.exists())
+
+        user = get_user_model().objects.create_superuser(username="bench-admin")
+        self.client.force_login(user)
+        self.assertContains(self.client.get(reverse("myapp:devices_dashboard")), alias)
+        self.assertContains(self.client.get(reverse("myapp:device_logs_dashboard")), "HEALTHY")
+
+    def test_public_tls_is_anonymous_and_outbound_controls_are_blocked(self):
+        import ssl
+
+        config = mqtt_connection(subscribe_only=True)
+        self.assertEqual((config["hostname"], config["port"]), ("broker.emqx.io", 8883))
+        self.assertIsNone(config["auth"])
+        self.assertTrue(config["tls"].check_hostname)
+        self.assertEqual(config["tls"].verify_mode, ssl.CERT_REQUIRED)
+        with self.assertRaises(ValidationError):
+            mqtt_connection()
+        with self.assertRaisesMessage(ValidationError, "OTA is disabled"):
+            create_and_issue_ota(None, None, Mock())
+        with patch("myapp.views.mqtt_publish.single") as publish:
+            self.assertFalse(publish_start_once(None))
+            publish.assert_not_called()
+        with patch("myapp.views.requests.get") as payment_api:
+            self.assertEqual(self.client.get(reverse("myapp:check_payment")).status_code, 403)
+            payment_api.assert_not_called()
+
+    @override_settings(MQTT_PUBLIC_TEST_MODE=False, MQTT_BROKER="BROKER.EMQX.IO.")
+    def test_secure_mode_rejects_public_broker_even_with_credentials(self):
+        with self.assertRaises(ValidationError):
+            mqtt_connection(subscribe_only=True)

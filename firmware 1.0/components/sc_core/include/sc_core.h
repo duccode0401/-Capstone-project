@@ -8,11 +8,14 @@
 #include "freertos/task.h"
 
 #define SC_BASE "iot/charge_station/v1/"
+#define SC_PUBLIC_TEST_BROKER "mqtts://broker.emqx.io:8883"
+#define SC_PUBLIC_TEST_BASE "iot/charge_station/test/"
 #define SC_MESSAGE_MAX 1536
 typedef struct {
     char device[32], ssid[33], password[65];
     char broker[192], mqtt_user[64], mqtt_password[128];
     char trust_base[192], key_hex[65];
+    bool mqtt_public_test_mode;
 } sc_config_t;
 typedef struct {
     char device[32], request_id[64], version[32], manifest_url[384];
@@ -22,7 +25,7 @@ typedef struct {
 typedef struct { bool ota; char data[SC_MESSAGE_MAX]; } sc_command_t;
 extern sc_config_t sc_config;
 cJSON *sc_parse_flat_json(const char *text, size_t max_length);
-esp_err_t sc_init(const char *fallback_ssid, const char *fallback_password);
+esp_err_t sc_init(void);
 void sc_relay_off(void);
 bool sc_ota_enabled(void);
 bool sc_private_broker(const char *uri);

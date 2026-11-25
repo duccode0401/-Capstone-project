@@ -11,7 +11,12 @@ import re
 import secrets
 import subprocess
 import sys
+from urllib.parse import urlsplit
 from ota_protocol import release, trusted_url
+
+
+PUBLIC_BROKER = "mqtts://broker.emqx.io:8883"
+PUBLIC_HOSTS = ("broker.hivemq.com", "broker.emqx.io")
 
 
 def main():
@@ -27,40 +32,60 @@ def main():
                    help="Authorize first UART-preloaded app, only on initial provisioning")
     a = p.parse_args()
     cfg = json.loads(a.config.read_text(encoding="utf-8-sig"))
-    a.out.mkdir(parents=True, exist_ok=True)
+    test_mode = cfg.get("MQTT_PUBLIC_TEST_MODE", False)
+    if not isinstance(test_mode, bool):
+        raise ValueError("MQTT_PUBLIC_TEST_MODE must be a JSON boolean")
     if a.image:
+        if test_mode:
+            raise ValueError("OTA signing is disabled in public test mode")
         command, manifest = release(cfg, a.image.read_bytes(), a.request_id, a.seq,
                                     a.manifest_url, a.image_url)
+        a.out.mkdir(parents=True, exist_ok=True)
         for name, value in (("command.json", command), ("manifest.json", manifest)):
             (a.out / name).write_text(json.dumps(value, indent=2), encoding="utf-8")
         print("Created signed command.json and manifest.json; no credentials printed")
         return
-    limits = {"device": 31, "ssid": 32, "password": 64, "broker": 191,
-              "mqtt_user": 63, "mqtt_password": 127, "trust_base": 191}
+
+    limits = {"device": 31, "ssid": 32, "password": 64, "broker": 191, "trust_base": 191}
+    if test_mode:
+        if not cfg.get("device"):
+            cfg["device"] = "SC_TEST_" + secrets.token_hex(8)
+        cfg.setdefault("broker", PUBLIC_BROKER)
+        if any(cfg.get(field) for field in ("mqtt_user", "mqtt_password", "key_hex")):
+            raise ValueError("Leave MQTT credentials and key_hex empty in public test mode")
+    else:
+        limits.update(mqtt_user=63, mqtt_password=127)
     for field, limit in limits.items():
         if field not in cfg or not isinstance(cfg[field], str) or len(cfg[field].encode()) > limit:
             raise ValueError(f"Missing or oversized {field}")
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,31}", cfg["device"]):
         raise ValueError("Invalid device ID")
-    if (not cfg["broker"].startswith("mqtts://") or not cfg["mqtt_user"] or not cfg["mqtt_password"]
-            or any(c in cfg["broker"] for c in "\r\n\t @?#")):
-        raise ValueError("Provision an authenticated TLS broker account for this device")
-    from urllib.parse import urlsplit
-    broker = urlsplit(cfg["broker"])
-    host = (broker.hostname or "").lower().rstrip(".")
-    if (host == "broker.hivemq.com" or host.endswith(".broker.hivemq.com")
-            or not host or broker.path or broker.port == 0
-            or not trusted_url(cfg["trust_base"], cfg["trust_base"])):
-        raise ValueError("Provision your own trusted broker and HTTPS firmware base")
-    cfg.setdefault("key_hex", secrets.token_hex(32))
-    if not re.fullmatch(r"[a-fA-F0-9]{64}", cfg["key_hex"]):
-        raise ValueError("key_hex must contain 32 bytes in hex")
-    # Django validates lowercase hex in OTA_DEVICE_KEYS_JSON.
-    cfg["key_hex"] = cfg["key_hex"].lower()
+    if not cfg["ssid"] or not trusted_url(cfg["trust_base"], cfg["trust_base"]):
+        raise ValueError("Provision Wi-Fi and an HTTPS trust base")
+    if test_mode:
+        if cfg["broker"] != PUBLIC_BROKER or not re.fullmatch(r"SC_TEST_[a-f0-9]{16}", cfg["device"]):
+            raise ValueError("Public test mode requires the EMQX TLS endpoint and a test device alias")
+        cfg = {field: cfg[field] for field in limits}
+        cfg["MQTT_PUBLIC_TEST_MODE"] = True
+    else:
+        broker = urlsplit(cfg["broker"])
+        host = (broker.hostname or "").lower().rstrip(".")
+        if (broker.scheme != "mqtts" or not re.fullmatch(r"[A-Za-z0-9.-]+", host)
+                or any(host == public or host.endswith("." + public) for public in PUBLIC_HOSTS)
+                or broker.path or broker.port == 0
+                or any(c in cfg["broker"] for c in "\r\n\t @?#\\")
+                or not cfg["mqtt_user"] or not cfg["mqtt_password"]):
+            raise ValueError("Provision an authenticated private TLS broker")
+        cfg.setdefault("key_hex", secrets.token_hex(32))
+        if not isinstance(cfg["key_hex"], str) or not re.fullmatch(r"[a-fA-F0-9]{64}", cfg["key_hex"]):
+            raise ValueError("key_hex must contain 32 bytes in hex")
+        cfg["key_hex"] = cfg["key_hex"].lower()
     text = json.dumps(cfg, separators=(",", ":"), ensure_ascii=True)
     if len(text) >= 4096:
         raise ValueError("Configuration exceeds firmware bound")
-    (a.out / "device-secret.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    a.out.mkdir(parents=True, exist_ok=True)
+    if not test_mode:
+        (a.out / "device-secret.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     csv_path = a.out / "nvs.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -72,6 +97,8 @@ def main():
     generator = Path(os.environ["IDF_PATH"]) / "components/nvs_flash/nvs_partition_generator/nvs_partition_gen.py"
     subprocess.run([sys.executable, str(generator), "generate", str(csv_path),
                     str(a.out / "nvs.bin"), "0x4000"], check=True)
+    if test_mode:
+        print("MQTT_PUBLIC_TEST_DEVICE=" + cfg["device"])
     print("Created secret provisioning files. Do not commit, serve or log these files.")
 
 

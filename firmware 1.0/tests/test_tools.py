@@ -40,6 +40,39 @@ class ToolTests(unittest.TestCase):
             self.assertEqual(command["signature"], sign(command_text(command), secret["key_hex"]))
             self.assertEqual(manifest["signature"], sign(manifest_text(manifest), secret["key_hex"]))
 
+    @unittest.skipUnless(os.environ.get("IDF_PATH"), "Requires ESP-IDF NVS generator")
+    def test_public_bootstrap_without_credentials(self):
+        with tempfile.TemporaryDirectory(prefix="sc-public-test-") as directory:
+            root = Path(directory)
+            config = {
+                "MQTT_PUBLIC_TEST_MODE": True,
+                "ssid": "test-network",
+                "password": "test-wifi-only",
+                "broker": "mqtts://broker.emqx.io:8883",
+                "trust_base": "https://example.com/",
+            }
+            source = root / "config.json"
+            source.write_text(json.dumps(config))
+            out = root / "out"
+            tool = [sys.executable, str(ROOT / "tools/provision.py"),
+                    "--config", str(source), "--out", str(out)]
+            result = subprocess.run(tool + ["--bootstrap"], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertRegex(result.stdout, r"MQTT_PUBLIC_TEST_DEVICE=SC_TEST_[a-f0-9]{16}")
+            self.assertNotIn(config["password"], result.stdout + result.stderr)
+            self.assertEqual((out / "nvs.bin").stat().st_size, 0x4000)
+            self.assertFalse((out / "device-secret.json").exists())
+            self.assertNotIn("key_hex", (out / "nvs.csv").read_text())
+            result = subprocess.run(tool + ["--image", "unused.bin"], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("OTA signing is disabled", result.stderr)
+            config.update(MQTT_PUBLIC_TEST_MODE=False, device="ESP32_TEST",
+                          mqtt_user="test-user", mqtt_password="test-mqtt")
+            source.write_text(json.dumps(config))
+            result = subprocess.run(tool + ["--bootstrap"], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("authenticated private TLS broker", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,14 +7,14 @@
 void app_main(void)
 {
     sc_relay_off();
-    esp_err_t e=sc_init(NULL,NULL);
+    esp_err_t e=sc_init();
     if(e!=ESP_OK) {
         ESP_LOGE("RECOVERY","Provisioning / flash check failed: %s; relay remains OFF",esp_err_to_name(e));
         while(1) vTaskDelay(pdMS_TO_TICKS(1000));
     }
     /* Establish durable factory selection on every recovery entry, even after rollback. */
     ESP_ERROR_CHECK(sc_go_recovery());
-    ESP_ERROR_CHECK(sc_recovery_entry());
+    if(!sc_config.mqtt_public_test_mode) ESP_ERROR_CHECK(sc_recovery_entry());
     sc_network_start(NULL);
     sc_log("WARN","RECOVERING","Recovery running; relay locked OFF");
     unsigned retry_s=5;
@@ -33,7 +33,11 @@ void app_main(void)
             const esp_partition_t *app=esp_partition_find_first(0,ESP_PARTITION_SUBTYPE_APP_OTA_0,NULL);
             ESP_ERROR_CHECK(sc_set_state("bootstrapped"));
             if(app && esp_ota_set_boot_partition(app)==ESP_OK) esp_restart();
-            sc_log("ERROR","BOOTSTRAP_FAILED","Preloaded app invalid; waiting for signed OTA command");
+            sc_log("ERROR","BOOTSTRAP_FAILED","Preloaded application invalid");
+        }
+        if(sc_config.mqtt_public_test_mode) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
         }
         bool pending=sc_get_state(state,sizeof(state))==ESP_OK &&
             (!strcmp(state,"pending") || !strcmp(state,"candidate"));

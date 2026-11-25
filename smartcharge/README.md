@@ -1,5 +1,8 @@
 # SmartCharge backend
 
+Để xem telemetry và log từ ESP32 trên bàn test mà không cần tài khoản MQTT,
+dùng [chế độ EMQX công cộng](../firmware%201.0/PUBLIC_MQTT_TEST.md).
+
 ## Khởi động
 
 Tạo môi trường và cài dependency (chỉ cần làm lần đầu):
@@ -58,3 +61,5 @@ python manage.py check
 python manage.py makemigrations --check --dry-run
 python manage.py test
 ```
+
+[Hướng dẫn chạy ESP32 và Django với EMQX Public Broker](../firmware%201.0/PUBLIC_MQTT_TEST.md)

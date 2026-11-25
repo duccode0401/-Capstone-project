@@ -12,7 +12,6 @@
 #include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_system.h"
-#include "sdkconfig.h"
 
 #define CHARGE_RELAY_GPIO GPIO_NUM_25
 /* Business rate intentionally unchanged: 10,000 VND -> 0.9 Wh.
@@ -39,11 +38,13 @@ static void health_timeout(void *arg)
 }
 static void relay_set(bool on)
 {
+    on=on && !sc_config.mqtt_public_test_mode;
     ESP_ERROR_CHECK(gpio_set_level(CHARGE_RELAY_GPIO,on?1:0));
     sc_log("INFO",on?"RELAY_ON":"RELAY_OFF",on?"Charging relay ON":"Charging relay OFF");
 }
 void handle_payment(const char *msg)
 {
+    if(sc_config.mqtt_public_test_mode) return;
     char dev[32],extra;
     int port,money;
     if(sscanf(msg,"%31s %d %d %c",dev,&port,&money,&extra)!=3 || money<=0 ||
@@ -63,6 +64,17 @@ void handle_payment(const char *msg)
 void update_energy(power_meter_t *m)
 {
     int64_t now=esp_timer_get_time();
+    if(sc_config.mqtt_public_test_mode) {
+        /* Bench measurements use elapsed time between valid ADC windows. */
+        if(have_previous_power) {
+            double delta=(previous_power+m->P)*0.5*(now-energy_time_us)/3600000000.0;
+            if(delta>=0 && isfinite(delta)) lifetime_wh+=delta;
+        }
+        energy_time_us=now;
+        previous_power=m->P;
+        have_previous_power=true;
+        return;
+    }
     if(!charging_enable) { energy_time_us=now; return; }
     double dt=(now-energy_time_us)/1000000.0;
     /* Integrate measured real power using elapsed monotonic time; no 1s assumption.
@@ -135,7 +147,7 @@ static void ota_command(const char *json)
 static void confirm_startup(void)
 {
     if(healthy || good_samples<5 || esp_timer_get_time()-boot_started_us<30000000LL ||
-       (boot_candidate && !sc_network_ready()) || !display_is_healthy()) return;
+       (boot_candidate && !sc_config.mqtt_public_test_mode && !sc_network_ready()) || !display_is_healthy()) return;
     ESP_ERROR_CHECK(sc_confirm_healthy());
     healthy=true;
     ESP_ERROR_CHECK(esp_timer_stop(health_deadline));
@@ -144,7 +156,7 @@ static void confirm_startup(void)
 static void report_version(void)
 {
     static int64_t last;
-    if(!healthy || !sc_network_ready() || esp_timer_get_time()-last<10000000LL) return;
+    if(sc_config.mqtt_public_test_mode || !healthy || !sc_network_ready() || esp_timer_get_time()-last<10000000LL) return;
     sc_request_t r; char state[24]={0};
     if(sc_load_request(&r)==ESP_OK && sc_get_state(state,sizeof(state))==ESP_OK &&
        (!strcmp(state,"candidate") || !strcmp(state,"success"))) {
@@ -162,7 +174,7 @@ void app_main(void)
 {
     /* Configure OFF before LVGL, NVS, ADC or any network initialization. */
     sc_relay_off();
-    ESP_ERROR_CHECK(sc_init(CONFIG_ESP_WIFI_SSID,CONFIG_ESP_WIFI_PASSWORD));
+    ESP_ERROR_CHECK(sc_init());
     ESP_ERROR_CHECK(sc_boot_guard());
     esp_ota_img_states_t initial_state;
     const esp_partition_t *running=esp_ota_get_running_partition();
@@ -185,6 +197,7 @@ void app_main(void)
         sample_valid=e==ESP_OK && isfinite(meter.P) && isfinite(meter.Irms) && isfinite(meter.Vrms);
         if(!sample_valid) {
             relay_set(false); charging_enable=false; good_samples=0;
+            if(sc_config.mqtt_public_test_mode) have_previous_power=false;
             sc_log("ERROR","SENSOR_ERROR","ADC measurement failed; relay OFF");
         } else {
             good_samples++;
@@ -194,12 +207,13 @@ void app_main(void)
         confirm_startup(); report_version(); publish_done();
         sc_command_t command;
         /* Bound work per measurement iteration; all session/relay state has one owner. */
-        if(sc_receive(&command)) {
+        if(!sc_config.mqtt_public_test_mode && sc_receive(&command)) {
             if(command.ota) ota_command(command.data);
             else handle_payment(command.data);
         }
         portENTER_CRITICAL(&snapshot_lock);
-        snapshot=(snapshot_t){.meter=meter,.total=energy_Wh,.accumulated=lifetime_wh,
+        snapshot=(snapshot_t){.meter=meter,.total=sc_config.mqtt_public_test_mode?lifetime_wh:energy_Wh,
+                              .accumulated=lifetime_wh,
                               .charging=charging_enable,.valid=sample_valid};
         portEXIT_CRITICAL(&snapshot_lock);
         ESP_ERROR_CHECK(esp_task_wdt_reset());

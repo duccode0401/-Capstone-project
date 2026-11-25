@@ -8,4 +8,5 @@ __pycache__/
 .env.*
 !.env.example
 db.sqlite3
+db-public-test.sqlite3
 /media-private/

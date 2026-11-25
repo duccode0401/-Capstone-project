@@ -84,10 +84,13 @@ WSGI_APPLICATION = 'smartcharge.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
+MQTT_PUBLIC_TEST_MODE = os.environ.get("MQTT_PUBLIC_TEST_MODE", "").strip().lower() == "true"
+MQTT_PUBLIC_TEST_DEVICE = os.environ.get("MQTT_PUBLIC_TEST_DEVICE", "").strip()
+
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'NAME': BASE_DIR / ('db-public-test.sqlite3' if MQTT_PUBLIC_TEST_MODE else 'db.sqlite3'),
     }
 }
 

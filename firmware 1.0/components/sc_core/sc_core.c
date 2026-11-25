@@ -118,10 +118,13 @@ bool sc_private_broker(const char *uri)
     }
     while(length && host[length-1]=='.') length--;
     host[length]=0;
-    const char *public_host="broker.hivemq.com";
-    size_t public_len=strlen(public_host);
-    if(!length || !strcmp(host,public_host) || (length>public_len &&
-        host[length-public_len-1]=='.' && !strcmp(host+length-public_len,public_host))) return false;
+    const char *public_hosts[]={"broker.hivemq.com","broker.emqx.io"};
+    if(!length) return false;
+    for(size_t i=0;i<sizeof(public_hosts)/sizeof(public_hosts[0]);i++) {
+        size_t public_len=strlen(public_hosts[i]);
+        if(!strcmp(host,public_hosts[i]) || (length>public_len &&
+           host[length-public_len-1]=='.' && !strcmp(host+length-public_len,public_hosts[i]))) return false;
+    }
     if(colon) {
         if(!colon[1] || strspn(colon+1,"0123456789")!=strlen(colon+1) || strlen(colon+1)>5) return false;
         unsigned long port=strtoul(colon+1,NULL,10);
@@ -131,7 +134,8 @@ bool sc_private_broker(const char *uri)
 }
 bool sc_ota_enabled(void)
 {
-    return storage_ready && strlen(sc_config.key_hex)==64 &&
+    return storage_ready && !sc_config.mqtt_public_test_mode &&
+           strlen(sc_config.key_hex)==64 && strspn(sc_config.key_hex,"0123456789abcdefABCDEF")==64 &&
            sc_private_broker(sc_config.broker) &&
            sc_config.mqtt_user[0] && sc_config.mqtt_password[0] &&
            sc_trusted_url(sc_config.trust_base);
@@ -168,46 +172,40 @@ bool sc_version_newer(const char *candidate, const char *current)
     for (int i=0;i<3;i++) if (a[i]!=b[i]) return a[i]>b[i];
     return false;
 }
-esp_err_t sc_init(const char *ssid, const char *password)
+esp_err_t sc_init(void)
 {
     sc_relay_off();
     /* Never erase shared provisioning / OTA state automatically on NVS errors. */
-    esp_err_t e=nvs_flash_init(); if (e!=ESP_OK) return e;
+    esp_err_t e=nvs_flash_init(); if(e!=ESP_OK) return e;
     e=nvs_open("sc",NVS_READWRITE,&store); if(e!=ESP_OK) return e;
     storage_ready=true;
-    strcpy(sc_config.device,"ESP32_001");
-    strcpy(sc_config.broker,"mqtts://broker.hivemq.com:8883");
     char *config=calloc(1,4096);
-    if (!config) return ESP_ERR_NO_MEM;
+    if(!config) return ESP_ERR_NO_MEM;
     size_t n=4096;
     e=nvs_get_str(store,"cfg",config,&n);
-    if (e==ESP_OK) {
-        cJSON *j=sc_parse_flat_json(config,4095);
-        bool ok=j && field(j,"device",sc_config.device,sizeof(sc_config.device)) && token(sc_config.device) &&
-            field(j,"ssid",sc_config.ssid,sizeof(sc_config.ssid)) &&
-            field(j,"password",sc_config.password,sizeof(sc_config.password)) &&
-            field(j,"broker",sc_config.broker,sizeof(sc_config.broker));
-        if(j) {
-            field(j,"mqtt_user",sc_config.mqtt_user,sizeof(sc_config.mqtt_user));
-            field(j,"mqtt_password",sc_config.mqtt_password,sizeof(sc_config.mqtt_password));
-            field(j,"trust_base",sc_config.trust_base,sizeof(sc_config.trust_base));
-            field(j,"key_hex",sc_config.key_hex,sizeof(sc_config.key_hex));
-        }
-        cJSON_Delete(j); free(config);
-        if(!ok) return ESP_ERR_INVALID_ARG;
-    } else if (e==ESP_ERR_NVS_NOT_FOUND && ssid && password) {
-        snprintf(sc_config.ssid,sizeof(sc_config.ssid),"%s",ssid);
-        snprintf(sc_config.password,sizeof(sc_config.password),"%s",password);
-        cJSON *j=cJSON_CreateObject();
-        cJSON_AddStringToObject(j,"device",sc_config.device);
-        cJSON_AddStringToObject(j,"ssid",sc_config.ssid);
-        cJSON_AddStringToObject(j,"password",sc_config.password);
-        cJSON_AddStringToObject(j,"broker",sc_config.broker);
-        bool printed=cJSON_PrintPreallocated(j,config,4096,false);
-        e=printed?put_string("cfg",config):ESP_ERR_NO_MEM;
-        cJSON_Delete(j); free(config); if(e!=ESP_OK) return e;
-    } else { free(config); return e; }
-    if (strncmp(sc_config.broker,"mqtts://",8) || strpbrk(sc_config.broker,"\r\n\t @?#")) return ESP_ERR_INVALID_ARG;
+    cJSON *j=e==ESP_OK?sc_parse_flat_json(config,4095):NULL;
+    free(config);
+    if(e!=ESP_OK) return e;
+    const cJSON *mode=cJSON_GetObjectItemCaseSensitive(j,"MQTT_PUBLIC_TEST_MODE");
+    sc_config.mqtt_public_test_mode=cJSON_IsTrue(mode);
+    bool ok=j && (!mode || cJSON_IsBool(mode)) &&
+        field(j,"device",sc_config.device,sizeof(sc_config.device)) && token(sc_config.device) &&
+        field(j,"ssid",sc_config.ssid,sizeof(sc_config.ssid)) && sc_config.ssid[0] &&
+        field(j,"password",sc_config.password,sizeof(sc_config.password)) &&
+        field(j,"broker",sc_config.broker,sizeof(sc_config.broker)) &&
+        field(j,"trust_base",sc_config.trust_base,sizeof(sc_config.trust_base));
+    if(ok && !sc_config.mqtt_public_test_mode) {
+        ok=field(j,"mqtt_user",sc_config.mqtt_user,sizeof(sc_config.mqtt_user)) &&
+           field(j,"mqtt_password",sc_config.mqtt_password,sizeof(sc_config.mqtt_password)) &&
+           field(j,"key_hex",sc_config.key_hex,sizeof(sc_config.key_hex)) && sc_ota_enabled();
+    } else if(ok) {
+        const char *alias=sc_config.device;
+        ok=!strcmp(sc_config.broker,SC_PUBLIC_TEST_BROKER) && sc_trusted_url(sc_config.trust_base) &&
+           strlen(alias)==24 && !strncmp(alias,"SC_TEST_",8) &&
+           strspn(alias+8,"0123456789abcdef")==16;
+    }
+    cJSON_Delete(j);
+    if(!ok) return ESP_ERR_INVALID_ARG;
     uint32_t bytes=0;
     e=esp_flash_get_physical_size(NULL,&bytes);
     if(e!=ESP_OK || bytes!=0x400000) return ESP_ERR_INVALID_SIZE;
@@ -327,7 +325,7 @@ esp_err_t sc_boot_guard(void)
 {
     char update_state[24]={0};
     sc_request_t pending_request;
-    if(sc_get_state(update_state,sizeof(update_state))==ESP_OK && !strcmp(update_state,"pending") &&
+    if(!sc_config.mqtt_public_test_mode && sc_get_state(update_state,sizeof(update_state))==ESP_OK && !strcmp(update_state,"pending") &&
        sc_load_request(&pending_request)==ESP_OK) {
         esp_err_t transfer=sc_go_recovery();
         if(transfer==ESP_OK) esp_restart();
@@ -338,7 +336,7 @@ esp_err_t sc_boot_guard(void)
     if(e!=ESP_OK && e!=ESP_ERR_NVS_NOT_FOUND) return e;
     if(attempts>=3) {
         sc_request_t request;
-        if(sc_load_request(&request)==ESP_OK) {
+        if(!sc_config.mqtt_public_test_mode && sc_load_request(&request)==ESP_OK) {
             e=sc_set_state("pending"); if(e!=ESP_OK) return e;
         }
         e=sc_go_recovery(); if(e==ESP_OK) esp_restart(); return e;
@@ -359,7 +357,8 @@ esp_err_t sc_recovery_entry(void)
 esp_err_t sc_confirm_healthy(void)
 {
     char update_state[24]={0};
-    if(sc_get_state(update_state,sizeof(update_state))==ESP_OK && !strcmp(update_state,"candidate")) {
+    if(!sc_config.mqtt_public_test_mode && sc_get_state(update_state,sizeof(update_state))==ESP_OK &&
+       !strcmp(update_state,"candidate")) {
         sc_request_t r;
         if(sc_load_request(&r)!=ESP_OK || strcmp(r.version,esp_app_get_description()->version)) return ESP_ERR_INVALID_VERSION;
     }

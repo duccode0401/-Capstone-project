@@ -35,7 +35,8 @@ LVGL (resolved version in dependencies.lock), and cmake_utilities.
 NVS initializes before continuous ADC starts, and ADC interrupts are IRAM-safe.
 Credentials and per-device OTA trust settings live in the shared NVS namespace
 `sc`; use the provisioning tool documented in OTA_MQTT_PROTOCOL.md.
-The optional legacy menuconfig Wi-Fi values default to empty and do not enable OTA.
+Provision Wi-Fi through NVS. For bench telemetry without an MQTT account, follow
+[the EMQX public test guide](../PUBLIC_MQTT_TEST.md).
 
 MEM logs show physical flash, partition bounds, free/minimum/largest internal
 heap, task stack high watermarks and message drops. Runtime diagnostics run

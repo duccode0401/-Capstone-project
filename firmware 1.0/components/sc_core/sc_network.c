@@ -35,14 +35,24 @@ bool sc_network_ready(void)
 }
 bool sc_download_ready(void)
 {
-    return network && (xEventGroupGetBits(network)&WIFI_UP) && time(NULL)>1735689600;
+    return !sc_config.mqtt_public_test_mode && network && (xEventGroupGetBits(network)&WIFI_UP) && time(NULL)>1735689600;
 }
 bool sc_receive(sc_command_t *cmd) { return rx_queue && xQueueReceive(rx_queue,cmd,0)==pdTRUE; }
 bool sc_publish(const char *topic,const char *json,bool reliable)
 {
     outbound_t m={.reliable=reliable};
-    if(!tx_queue || strlen(topic)>=sizeof(m.topic) || strlen(json)>=sizeof(m.json)) return false;
-    strcpy(m.topic,topic); strcpy(m.json,json);
+    if(!tx_queue || strlen(json)>=sizeof(m.json)) return false;
+    if(sc_config.mqtt_public_test_mode) {
+        const char *kind;
+        if(!strcmp(topic,SC_BASE "telemetry")) kind="telemetry";
+        else if(!strcmp(topic,SC_BASE "logs")) kind="logs";
+        else return false;
+        snprintf(m.topic,sizeof(m.topic),SC_PUBLIC_TEST_BASE "%s/%s",sc_config.device,kind);
+    } else {
+        if(strlen(topic)>=sizeof(m.topic)) return false;
+        strcpy(m.topic,topic);
+    }
+    strcpy(m.json,json);
     if(xQueueSend(tx_queue,&m,0)!=pdTRUE) { atomic_fetch_add(&dropped,1); return false; }
     return true;
 }
@@ -53,7 +63,7 @@ void sc_log(const char *level,const char *event,const char *message)
     cJSON_AddStringToObject(j,"device",sc_config.device);
     cJSON_AddStringToObject(j,"level",level);
     cJSON_AddStringToObject(j,"event",event);
-    cJSON_AddStringToObject(j,"message",message);
+    if(!sc_config.mqtt_public_test_mode) cJSON_AddStringToObject(j,"message",message);
     cJSON_AddNumberToObject(j,"uptime_ms",esp_timer_get_time()/1000);
     char json[512];
     if(cJSON_PrintPreallocated(j,json,sizeof(json),false)) sc_publish(SC_BASE "logs",json,false);
@@ -86,7 +96,7 @@ static void mqtt_event(void *arg,esp_event_base_t base,int32_t id,void *data)
     if(id==MQTT_EVENT_CONNECTED) {
         xEventGroupSetBits(network,MQTT_UP);
 #ifndef SC_RECOVERY
-        esp_mqtt_client_subscribe(client,SC_BASE "orders",1);
+        if(!sc_config.mqtt_public_test_mode) esp_mqtt_client_subscribe(client,SC_BASE "orders",1);
 #endif
         if(sc_ota_enabled()) esp_mqtt_client_subscribe(client,SC_BASE "ota/command",1);
         sc_log("INFO","MQTT_CONNECTED","MQTT session connected");
@@ -94,7 +104,7 @@ static void mqtt_event(void *arg,esp_event_base_t base,int32_t id,void *data)
         xEventGroupClearBits(network,MQTT_UP);
         incoming_valid=false;
         sc_log("WARN","MQTT_DISCONNECTED","MQTT session disconnected");
-    } else if(id==MQTT_EVENT_DATA) {
+    } else if(id==MQTT_EVENT_DATA && !sc_config.mqtt_public_test_mode) {
         if(e->current_data_offset==0) {
             incoming_used=0; incoming_total=e->total_data_len;
             incoming_ota=topic_is(e,SC_BASE "ota/command");
@@ -179,11 +189,12 @@ void sc_network_start(void (*cb)(bool))
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA,&wifi));
     esp_sntp_config_t sntp=ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
     ESP_ERROR_CHECK(esp_netif_sntp_init(&sntp));
+    bool authenticated=!sc_config.mqtt_public_test_mode;
     esp_mqtt_client_config_t mqtt={
         .broker.address.uri=sc_config.broker,
         .broker.verification.crt_bundle_attach=esp_crt_bundle_attach,
-        .credentials.username=sc_config.mqtt_user[0]?sc_config.mqtt_user:NULL,
-        .credentials.authentication.password=sc_config.mqtt_password[0]?sc_config.mqtt_password:NULL,
+        .credentials.username=authenticated && sc_config.mqtt_user[0]?sc_config.mqtt_user:NULL,
+        .credentials.authentication.password=authenticated && sc_config.mqtt_password[0]?sc_config.mqtt_password:NULL,
         .credentials.client_id=sc_config.device,
         .buffer.size=1024, .buffer.out_size=1024,
         .task.stack_size=6144, .outbox.limit=4096,
