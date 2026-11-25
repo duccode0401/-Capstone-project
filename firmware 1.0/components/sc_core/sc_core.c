@@ -136,9 +136,19 @@ bool sc_ota_enabled(void)
 {
     return storage_ready && !sc_config.mqtt_public_test_mode &&
            strlen(sc_config.key_hex)==64 && strspn(sc_config.key_hex,"0123456789abcdefABCDEF")==64 &&
-           sc_private_broker(sc_config.broker) &&
-           sc_config.mqtt_user[0] && sc_config.mqtt_password[0] &&
+           ((sc_config.mqtt_public_signed_mode && !strcmp(sc_config.broker,SC_PUBLIC_TEST_BROKER)) ||
+            (sc_private_broker(sc_config.broker) && sc_config.mqtt_user[0] && sc_config.mqtt_password[0])) &&
            sc_trusted_url(sc_config.trust_base);
+}
+esp_err_t sc_commit_order_sequence(uint32_t sequence)
+{
+    if(!sc_ota_enabled() || !sequence) return ESP_ERR_INVALID_STATE;
+    uint32_t last=0;
+    esp_err_t e=nvs_get_u32(store,"order_seq",&last);
+    if(e!=ESP_OK && e!=ESP_ERR_NVS_NOT_FOUND) return e;
+    if(sequence<=last) return ESP_ERR_INVALID_STATE;
+    e=nvs_set_u32(store,"order_seq",sequence);
+    return e==ESP_OK?nvs_commit(store):e;
 }
 bool sc_verify_hmac(const char *text, const char *hex)
 {
@@ -187,16 +197,23 @@ esp_err_t sc_init(void)
     free(config);
     if(e!=ESP_OK) return e;
     const cJSON *mode=cJSON_GetObjectItemCaseSensitive(j,"MQTT_PUBLIC_TEST_MODE");
+    const cJSON *signed_mode=cJSON_GetObjectItemCaseSensitive(j,"MQTT_PUBLIC_SIGNED_MODE");
     sc_config.mqtt_public_test_mode=cJSON_IsTrue(mode);
-    bool ok=j && (!mode || cJSON_IsBool(mode)) &&
+    sc_config.mqtt_public_signed_mode=cJSON_IsTrue(signed_mode);
+    bool ok=j && (!mode || cJSON_IsBool(mode)) && (!signed_mode || cJSON_IsBool(signed_mode)) &&
+        !(sc_config.mqtt_public_test_mode && sc_config.mqtt_public_signed_mode) &&
         field(j,"device",sc_config.device,sizeof(sc_config.device)) && token(sc_config.device) &&
         field(j,"ssid",sc_config.ssid,sizeof(sc_config.ssid)) && sc_config.ssid[0] &&
         field(j,"password",sc_config.password,sizeof(sc_config.password)) &&
         field(j,"broker",sc_config.broker,sizeof(sc_config.broker)) &&
         field(j,"trust_base",sc_config.trust_base,sizeof(sc_config.trust_base));
     if(ok && !sc_config.mqtt_public_test_mode) {
-        ok=field(j,"mqtt_user",sc_config.mqtt_user,sizeof(sc_config.mqtt_user)) &&
-           field(j,"mqtt_password",sc_config.mqtt_password,sizeof(sc_config.mqtt_password)) &&
+        ok=(sc_config.mqtt_public_signed_mode ?
+            (!strcmp(sc_config.device,"ESP32_001") &&
+             !cJSON_GetObjectItemCaseSensitive(j,"mqtt_user") &&
+             !cJSON_GetObjectItemCaseSensitive(j,"mqtt_password")) :
+            (field(j,"mqtt_user",sc_config.mqtt_user,sizeof(sc_config.mqtt_user)) &&
+             field(j,"mqtt_password",sc_config.mqtt_password,sizeof(sc_config.mqtt_password)))) &&
            field(j,"key_hex",sc_config.key_hex,sizeof(sc_config.key_hex)) && sc_ota_enabled();
     } else if(ok) {
         const char *alias=sc_config.device;

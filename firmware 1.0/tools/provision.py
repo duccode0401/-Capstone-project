@@ -17,6 +17,7 @@ from ota_protocol import release, trusted_url
 
 PUBLIC_BROKER = "mqtts://broker.emqx.io:8883"
 PUBLIC_HOSTS = ("broker.hivemq.com", "broker.emqx.io")
+EMQX_TRUST_BASE = "https://capillary-sled-monogamy.ngrok-free.dev/"
 
 
 def main():
@@ -33,8 +34,9 @@ def main():
     a = p.parse_args()
     cfg = json.loads(a.config.read_text(encoding="utf-8-sig"))
     test_mode = cfg.get("MQTT_PUBLIC_TEST_MODE", False)
-    if not isinstance(test_mode, bool):
-        raise ValueError("MQTT_PUBLIC_TEST_MODE must be a JSON boolean")
+    signed_mode = cfg.get("MQTT_PUBLIC_SIGNED_MODE", False)
+    if not isinstance(test_mode, bool) or not isinstance(signed_mode, bool) or (test_mode and signed_mode):
+        raise ValueError("Select at most one public MQTT mode using JSON booleans")
     if a.image:
         if test_mode:
             raise ValueError("OTA signing is disabled in public test mode")
@@ -53,6 +55,12 @@ def main():
         cfg.setdefault("broker", PUBLIC_BROKER)
         if any(cfg.get(field) for field in ("mqtt_user", "mqtt_password", "key_hex")):
             raise ValueError("Leave MQTT credentials and key_hex empty in public test mode")
+    elif signed_mode:
+        cfg.setdefault("device", "ESP32_001")
+        cfg.setdefault("broker", PUBLIC_BROKER)
+        cfg.setdefault("trust_base", EMQX_TRUST_BASE)
+        if any(cfg.get(field) for field in ("mqtt_user", "mqtt_password")):
+            raise ValueError("Leave MQTT credentials empty for signed EMQX mode")
     else:
         limits.update(mqtt_user=63, mqtt_password=127)
     for field, limit in limits.items():
@@ -67,6 +75,12 @@ def main():
             raise ValueError("Public test mode requires the EMQX TLS endpoint and a test device alias")
         cfg = {field: cfg[field] for field in limits}
         cfg["MQTT_PUBLIC_TEST_MODE"] = True
+    elif signed_mode:
+        if cfg["broker"] != PUBLIC_BROKER or cfg["device"] != "ESP32_001":
+            raise ValueError("Signed EMQX mode requires the EMQX TLS endpoint and ESP32_001")
+        cfg.setdefault("key_hex", secrets.token_hex(32))
+        cfg = {field: cfg[field] for field in (*limits, "key_hex")}
+        cfg["MQTT_PUBLIC_SIGNED_MODE"] = True
     else:
         broker = urlsplit(cfg["broker"])
         host = (broker.hostname or "").lower().rstrip(".")
@@ -77,6 +91,7 @@ def main():
                 or not cfg["mqtt_user"] or not cfg["mqtt_password"]):
             raise ValueError("Provision an authenticated private TLS broker")
         cfg.setdefault("key_hex", secrets.token_hex(32))
+    if not test_mode:
         if not isinstance(cfg["key_hex"], str) or not re.fullmatch(r"[a-fA-F0-9]{64}", cfg["key_hex"]):
             raise ValueError("key_hex must contain 32 bytes in hex")
         cfg["key_hex"] = cfg["key_hex"].lower()

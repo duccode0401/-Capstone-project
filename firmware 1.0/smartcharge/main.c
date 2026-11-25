@@ -2,10 +2,14 @@
 #include "display_lvgl.h"
 #include "wifi_mqtt.h"
 #include "sc_core.h"
+#include "signed_order.h"
+#include <time.h>
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
 #include "driver/gpio.h"
+#include "esp_attr.h"
+#include "soc/gpio_reg.h"
 #include "esp_timer.h"
 #include "esp_task_wdt.h"
 #include "esp_ota_ops.h"
@@ -14,12 +18,14 @@
 #include "esp_system.h"
 
 #define CHARGE_RELAY_GPIO GPIO_NUM_25
+#define CHARGE_TIMEOUT_US (15LL * 60 * 1000000)
 /* Business rate intentionally unchanged: 10,000 VND -> 0.9 Wh.
  * Old comment said 130 Wh; business owner must confirm before changing it. */
 #define WH_PER_10000_VND 0.9f
 static double energy_Wh, energy_target_Wh, lifetime_wh;
 static bool charging_enable, ota_locked, healthy, sample_valid;
-static int64_t energy_time_us, boot_started_us;
+static int64_t energy_time_us, boot_started_us, charge_deadline_us;
+static uint32_t charge_network_epoch;
 static float previous_power;
 static bool have_previous_power;
 static unsigned good_samples;
@@ -30,6 +36,11 @@ typedef struct { power_meter_t meter; double total, accumulated; bool charging, 
 static snapshot_t snapshot;
 static portMUX_TYPE snapshot_lock=portMUX_INITIALIZER_UNLOCKED;
 
+/* The task watchdog invokes this in ISR context before the panic/reset. */
+void IRAM_ATTR esp_task_wdt_isr_user_handler(void)
+{
+    REG_WRITE(GPIO_OUT_W1TC_REG,1U << CHARGE_RELAY_GPIO);
+}
 static void health_timeout(void *arg)
 {
     /* PENDING_VERIFY is rejected by the standard rollback bootloader next boot. */
@@ -42,24 +53,52 @@ static void relay_set(bool on)
     ESP_ERROR_CHECK(gpio_set_level(CHARGE_RELAY_GPIO,on?1:0));
     sc_log("INFO",on?"RELAY_ON":"RELAY_OFF",on?"Charging relay ON":"Charging relay OFF");
 }
-void handle_payment(const char *msg)
+static void payment_rejected(void)
 {
-    if(sc_config.mqtt_public_test_mode) return;
-    char dev[32],extra;
-    int port,money;
-    if(sscanf(msg,"%31s %d %d %c",dev,&port,&money,&extra)!=3 || money<=0 ||
-       strcmp(dev,sc_config.device) || port!=1) return;
-    sc_log("INFO","PAYMENT_RECEIVED","Payment command received for this device");
-    if(charging_enable || ota_locked || !healthy || !sample_valid) {
-        sc_log("WARN","PAYMENT_REJECTED","Device busy or not ready"); return;
+    /* All devices on the shared topic see the same orders. Bound public reject logs. */
+    static int64_t next_log;
+    int64_t now=esp_timer_get_time();
+    if(now<next_log) return;
+    next_log=now+10000000;
+    sc_log("WARN","PAYMENT_REJECTED","Order invalid, replayed or device unavailable");
+}
+static void handle_payment(const char *msg,uint32_t epoch)
+{
+    sc_signed_order_t order;
+    if(charging_enable || done_pending || ota_locked || !healthy || !sample_valid ||
+       !sc_network_ready() || !sc_parse_signed_order(msg,time(NULL),&order)) {
+        payment_rejected(); return;
     }
-    energy_target_Wh=(money/10000.0f)*WH_PER_10000_VND;
+    if(epoch!=sc_network_epoch() || sc_commit_order_sequence(order.sequence)!=ESP_OK ||
+       !sc_network_ready() || epoch!=sc_network_epoch()) {
+        payment_rejected(); return;
+    }
+    energy_target_Wh=(order.amount_vnd/10000.0f)*WH_PER_10000_VND;
     energy_Wh=0;
     energy_time_us=esp_timer_get_time(); have_previous_power=false;
+    charge_deadline_us=energy_time_us+CHARGE_TIMEOUT_US;
+    charge_network_epoch=epoch;
     charging_enable=true;
-    display_show_charging(money,energy_target_Wh);
     relay_set(true);
+    display_show_charging((int)order.amount_vnd,energy_target_Wh);
+    sc_log("INFO","PAYMENT_ACCEPTED","Authenticated order accepted");
     sc_log("INFO","CHARGING_STARTED","Charging session started");
+}
+static void stop_charge(const char *reason)
+{
+    relay_set(false);
+    charging_enable=false;
+    have_previous_power=false;
+    display_show_done();
+    sc_log("WARN","CHARGING_STOPPED",reason);
+}
+static void check_charge_failsafe(void)
+{
+    if(!charging_enable) return;
+    if(!sc_network_ready() || charge_network_epoch!=sc_network_epoch())
+        stop_charge("Connection lost; relay OFF");
+    else if(esp_timer_get_time()>=charge_deadline_us)
+        stop_charge("Session timeout; relay OFF");
 }
 void update_energy(power_meter_t *m)
 {
@@ -193,12 +232,20 @@ void app_main(void)
     sc_memory_log();
     int64_t last_memory_log=esp_timer_get_time();
     while(1) {
+        check_charge_failsafe();
         esp_err_t e=power_meter_get(&meter);
+        check_charge_failsafe();
         sample_valid=e==ESP_OK && isfinite(meter.P) && isfinite(meter.Irms) && isfinite(meter.Vrms);
         if(!sample_valid) {
-            relay_set(false); charging_enable=false; good_samples=0;
+            if(charging_enable) stop_charge("Sensor invalid; relay OFF");
+            good_samples=0;
             if(sc_config.mqtt_public_test_mode) have_previous_power=false;
-            sc_log("ERROR","SENSOR_ERROR","ADC measurement failed; relay OFF");
+            static int64_t next_sensor_log;
+            int64_t now=esp_timer_get_time();
+            if(now>=next_sensor_log) {
+                sc_log("ERROR","SENSOR_ERROR","ADC measurement failed; relay OFF");
+                next_sensor_log=now+10000000;
+            }
         } else {
             good_samples++;
             update_energy(&meter);
@@ -207,9 +254,9 @@ void app_main(void)
         confirm_startup(); report_version(); publish_done();
         sc_command_t command;
         /* Bound work per measurement iteration; all session/relay state has one owner. */
-        if(!sc_config.mqtt_public_test_mode && sc_receive(&command)) {
+        if(sc_receive(&command)) {
             if(command.ota) ota_command(command.data);
-            else handle_payment(command.data);
+            else handle_payment(command.data,command.network_epoch);
         }
         portENTER_CRITICAL(&snapshot_lock);
         snapshot=(snapshot_t){.meter=meter,.total=sc_config.mqtt_public_test_mode?lifetime_wh:energy_Wh,

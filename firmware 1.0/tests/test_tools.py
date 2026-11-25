@@ -74,5 +74,26 @@ class ToolTests(unittest.TestCase):
             self.assertIn("authenticated private TLS broker", result.stderr)
 
 
+    @unittest.skipUnless(os.environ.get("IDF_PATH"), "Requires ESP-IDF NVS generator")
+    def test_signed_emqx_provisioning_creates_key_without_mqtt_credentials(self):
+        with tempfile.TemporaryDirectory(prefix="sc-emqx-sign-") as directory:
+            root = Path(directory)
+            source = root / "config.json"
+            source.write_text(json.dumps(dict(MQTT_PUBLIC_SIGNED_MODE=True,
+                                              ssid="test-network", password="wifi-only")))
+            out = root / "out"
+            cmd = [sys.executable, str(ROOT / "tools/provision.py"),
+                   "--config", str(source), "--out", str(out), "--bootstrap"]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((out / "nvs.bin").stat().st_size, 0x4000)
+            secret = json.loads((out / "device-secret.json").read_text())
+            self.assertEqual(secret["device"], "ESP32_001")
+            self.assertEqual(secret["broker"], "mqtts://broker.emqx.io:8883")
+            self.assertEqual(len(bytes.fromhex(secret["key_hex"])), 32)
+            self.assertFalse({"mqtt_user", "mqtt_password"} & secret.keys())
+            self.assertNotIn(secret["key_hex"], result.stdout + result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

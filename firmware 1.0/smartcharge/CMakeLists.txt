@@ -8,6 +8,7 @@ idf_component_register(
         "display_lvgl.c"
         "screens/charge_test_screen.c"
         "wifi_mqtt.c"
+        "signed_order.c"
     INCLUDE_DIRS
         "."
         "screens"

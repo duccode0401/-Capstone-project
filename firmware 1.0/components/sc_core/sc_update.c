@@ -205,7 +205,15 @@ esp_err_t sc_install(const sc_request_t *r)
         err=esp_ota_write(ota,buf,used); if(err!=ESP_OK) break;
         received+=used;
         int p=(received*100/m.size)/10*10;
-        if(p!=progress) { sc_status(r,"DOWNLOADING",p); progress=p; }
+        if(p!=progress) {
+            sc_status(r,"DOWNLOADING",p);
+            if(p/25>progress/25) {
+                char message[48];
+                snprintf(message,sizeof(message),"Firmware download %d%%",p);
+                sc_log("INFO","OTA_PROGRESS",message);
+            }
+            progress=p;
+        }
     }
     unsigned char digest[32]={0}; char hex[65];
     if(err==ESP_OK && (received!=m.size || !esp_http_client_is_complete_data_received(h))) err=SC_OTA_ERR_DOWNLOAD_INTERRUPTED;

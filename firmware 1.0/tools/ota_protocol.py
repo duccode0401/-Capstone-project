@@ -21,6 +21,13 @@ def trusted_url(url, base):
             and re.fullmatch(r"[A-Za-z0-9._~:/-]+", url) is not None and ".." not in url[8:])
 
 
+def order_text(order):
+    """Canonical START_CHARGE message for the backend signer."""
+    return "\n".join(("SC-ORDER-1", order["device"], "START_CHARGE", str(order["port"]),
+                     order["order_id"], str(order["amount_vnd"]), str(order["expires_at"]),
+                     str(order["seq"])))
+
+
 def command_text(command):
     return "\n".join(("SC-CMD-1", command["device"], "START_OTA", command["request_id"],
                      command["version"], command["manifest_url"], str(int(command["seq"]))))

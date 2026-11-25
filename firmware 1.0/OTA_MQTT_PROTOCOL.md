@@ -19,6 +19,7 @@ Hai ứng dụng ESP32 / ESP-IDF **5.5.1** độc lập:
 Không chạy HTTP server trên ESP32. Không sửa source bootloader ESP-IDF.
 Không có firmware domain, tài khoản production hay khóa chung hard-code.
 OTA_SECURE yêu cầu broker MQTT TLS riêng, tài khoản MQTT, khóa HMAC và HTTPS tin cậy.
+Profile EMQX với HMAC cho lệnh sạc và OTA được mô tả trong [hướng dẫn firmware EMQX](EMQX_SIGNED_FIRMWARE.md).
 Để xem log và telemetry qua EMQX khi đã ngắt tải, dùng
 [chế độ test công cộng](PUBLIC_MQTT_TEST.md). Chế độ này khóa OTA và điều khiển tải.
 
