@@ -10,6 +10,7 @@ from threading import Barrier
 from unittest.mock import Mock, patch
 from urllib.parse import urlsplit
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
 from django.core.exceptions import ValidationError
@@ -353,6 +354,7 @@ class FirmwareUploadTests(TestCase):
 
 OTA_TEST_SETTINGS = {
     "FIRMWARE_HTTPS_BASE_URL": "https://ota.example.com",
+    "OTA_DEVICE_TRUST_BASES_JSON": json.dumps({"ESP32_001": "https://ota.example.com/"}),
     "OTA_DEVICE_KEYS_JSON": json.dumps({"ESP32_001": "11" * 32}),
     **MQTT_TEST_SETTINGS,
     "DEVICE_STALE_SECONDS": 30,
@@ -372,7 +374,7 @@ class OTAWorkflowTests(TestCase):
         )
         self.user = get_user_model().objects.get(pk=self.user.pk)
         self.device = ChargerDevice.objects.create(
-            device_id="ESP32_001", last_seen_at=timezone.now()
+            device_id="ESP32_001", last_seen_at=timezone.now(), firmware_version="1.0.0"
         )
         self.telemetry = DeviceTelemetry.objects.create(
             device=self.device, port=1, voltage_v=229, current_a=0,
@@ -543,6 +545,86 @@ class OTAWorkflowTests(TestCase):
         publish.assert_not_called()
 
     @patch("myapp.ota_services.publish_once")
+    def test_deployment_requires_a_newer_running_version(self, publish):
+        self.device.firmware_version = self.firmware.version
+        self.device.save(update_fields=["firmware_version"])
+        with self.assertRaisesMessage(ValidationError, "newer than the known device version"):
+            self.issue_ota()
+        publish.assert_not_called()
+
+    @patch("myapp.ota_services.publish_once")
+    def test_v2_ota_status_uses_firmware_wire_type_and_deduplicates(self, publish):
+        from types import SimpleNamespace
+
+        from .models import MqttAttempt
+
+        job, _ = self.issue_ota()
+        client = Mock(smartcharge_ack_mids={})
+        client.publish.return_value = SimpleNamespace(rc=0, mid=7)
+        data = {
+            "protocol_version": 2, "message_id": "0123456789abcdef-00000001",
+            "message_type": "ota_status", "uptime_ms": 1000, "device": self.device.device_id,
+            "request_id": job.request_id, "version": job.firmware.version,
+            "status": "DOWNLOADING", "progress": 40,
+        }
+        message = SimpleNamespace(topic=MQTT_TOPIC_OTA_STATUS, payload=json.dumps(data).encode(), retain=False)
+        for _ in range(2):
+            with self.captureOnCommitCallbacks(execute=True):
+                on_message(client, None, message)
+        job.refresh_from_db()
+        self.assertEqual(job.progress, 40)
+        self.assertEqual(job.progress_events.count(), 1)
+        self.assertEqual(MqttAttempt.objects.filter(status="DUPLICATE").count(), 1)
+        self.assertEqual(client.publish.call_count, 2)
+        ack_topic, payload = client.publish.call_args.args
+        self.assertEqual(ack_topic, "iot/charge_station/v1/ack/ESP32_001")
+        self.assertEqual(json.loads(payload)["message_type"], "ota_status")
+        self.assertEqual(json.loads(payload)["status"], "SUCCESS")
+
+    @patch("myapp.ota_services.publish_once")
+    def test_management_deploys_only_after_commit(self, publish):
+        self.user.user_permissions.add(
+            Permission.objects.get(codename="add_otajob"),
+            Permission.objects.get(codename="view_otajob"),
+        )
+        self.client.force_login(self.user)
+        url = reverse("myapp:ota_dashboard")
+        selection = {"device": self.device.pk, "firmware": self.firmware.pk}
+        self.assertContains(self.client.get(url, selection), "Đủ điều kiện triển khai.")
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(url, selection)
+            self.assertEqual(response.status_code, 302)
+            publish.assert_not_called()
+        publish.assert_called_once()
+        self.assertContains(self.client.get(response.url), "Pending")
+
+    @override_settings(OTA_DEVICE_TRUST_BASES_JSON='{"ESP32_001": "https://other.example.com/"}')
+    @patch("myapp.ota_services.publish_once")
+    def test_trust_base_mismatch_prevents_ota(self, publish):
+        with self.assertRaisesMessage(ValidationError, "provisioned trust_base"):
+            self.issue_ota()
+        publish.assert_not_called()
+
+    @patch("myapp.ota_services.publish_once")
+    def test_recovery_updates_and_timeout(self, publish):
+        from .ota_services import expire_stale_ota_jobs
+
+        job, _ = self.issue_ota()
+        base = {"device": self.device.device_id, "request_id": job.request_id, "version": "1.1.0"}
+        process_ota_status(dict(base, status="DOWNLOADING", progress=75))
+        with self.assertRaises(ValidationError):
+            process_ota_status(dict(base, status="DOWNLOADING", progress=20))
+        recovery = dict(base, status="RECOVERING", progress=0, error="HTTPS_DOWNLOAD_INTERRUPTED")
+        self.assertTrue(process_ota_status(recovery)[1])
+        self.assertFalse(process_ota_status(recovery)[1])
+        self.assertEqual(job.progress_events.count(), 2)
+        self.assertEqual(job.progress_events.last().reason, "HTTPS_DOWNLOAD_INTERRUPTED")
+        future = timezone.now() + timedelta(seconds=settings.OTA_STATUS_TIMEOUT_SECONDS + 1)
+        self.assertEqual(expire_stale_ota_jobs(future), 1)
+        with self.assertRaises(ValidationError):
+            process_ota_status(dict(base, status="SUCCESS", progress=100))
+
+    @patch("myapp.ota_services.publish_once")
     def test_recovery_retry_and_boot_confirmation(self, publish):
         job, _ = self.issue_ota()
         payload = {"device": self.device.device_id, "request_id": job.request_id, "version": "1.1.0"}
@@ -556,7 +638,7 @@ class OTAWorkflowTests(TestCase):
         for status, progress in (("RECOVERING", 0), ("DOWNLOADING", 0), ("VERIFYING", 100), ("INSTALLING", 100), ("REBOOTING", 100)):
             self.assertEqual(report(status, progress).status, status)
         self.device.refresh_from_db()
-        self.assertEqual(self.device.firmware_version, "")
+        self.assertEqual(self.device.firmware_version, "1.0.0")
         self.assertEqual(report("SUCCESS", 100).status, "SUCCESS")
         self.device.refresh_from_db()
         self.assertEqual(self.device.firmware_version, "1.1.0")

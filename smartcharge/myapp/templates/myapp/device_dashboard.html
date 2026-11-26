@@ -9,12 +9,12 @@
 <body><main class="shell">
   <div class="topbar">
     <div><h1>Device Monitoring</h1><p class="muted">Tự cập nhật mỗi 10 giây; dữ liệu cũ sẽ chuyển OFFLINE.</p></div>
-    <nav class="nav"><a href="{% url 'myapp:device_logs_dashboard' %}">Device logs</a><a href="{% url 'admin:index' %}">Admin</a></nav>
+    <nav class="nav"><a href="{% url 'myapp:device_logs_dashboard' %}">Device logs</a><a href="{% url 'myapp:ota_dashboard' %}">OTA</a><a href="{% url 'admin:index' %}">Admin</a></nav>
   </div>
   <section id="device-cards" class="cards">
   {% for d in devices %}
-    <article class="card" data-device="{{ d.device_id }}">
-      <div class="card-head"><div><strong>{{ d.device_id }}</strong><div class="muted firmware">FW {{ d.firmware_version }}</div></div><span class="badge {% if d.online %}online{% else %}offline{% endif %}">{% if d.online %}ONLINE{% else %}OFFLINE{% endif %}</span></div>
+    <article class="card" data-device="{{ d.routing_id }}">
+      <div class="card-head"><div><strong>{{ d.display_label }}</strong><div class="muted firmware">FW {{ d.firmware_version }}</div></div><span class="badge {% if d.online %}online{% else %}offline{% endif %}">{% if d.online %}ONLINE{% else %}OFFLINE{% endif %}</span></div>
       <div class="metrics">
         <div class="metric"><span>Voltage</span><strong data-key="voltage_v">{{ d.voltage_v|default_if_none:"—" }}</strong> V</div>
         <div class="metric"><span>Current</span><strong data-key="current_a">{{ d.current_a|default_if_none:"—" }}</strong> A</div>
@@ -32,14 +32,16 @@
         <div class="metric"><span>Sensor</span><strong data-key="sensor_status">{{ d.sensor_status|default_if_none:"—" }}</strong></div>
         <div class="metric"><span>Display</span><strong data-key="display_status">{{ d.display_status|default_if_none:"—" }}</strong></div>
         <div class="metric"><span>Mode</span><strong data-key="mode">{{ d.mode|default_if_none:"—" }}</strong></div>
+        <div class="metric"><span>Tổng RX</span><strong data-key="rx_count">{{ d.rx_count }}</strong></div>
         <div class="metric"><span>Success</span><strong data-key="success_count">{{ d.success_count|default_if_none:"—" }}</strong></div>
         <div class="metric"><span>Failed</span><strong data-key="failed_count">{{ d.failed_count|default_if_none:"—" }}</strong></div>
         <div class="metric"><span>Duplicate</span><strong data-key="duplicate_count">{{ d.duplicate_count|default_if_none:"—" }}</strong></div>
         <div class="metric"><span>Message ID</span><strong data-key="last_message_id">{{ d.last_message_id|default_if_none:"—" }}</strong></div>
         <div class="metric"><span>Last error</span><strong data-key="last_error">{{ d.last_error|default_if_none:"—" }}</strong></div>
       </div>
-      <p class="muted">Last heartbeat <span data-key="last_heartbeat">{{ d.last_heartbeat|default:"—" }}</span></p>
-      <p class="muted">Last seen: <span data-key="last_update">{{ d.last_update|default:"—" }}</span></p>
+      <p class="muted">Last heartbeat <span data-key="last_heartbeat">{{ d.last_heartbeat|date:"d/m/Y H:i:s"|default:"—" }}</span></p>
+      <p class="muted">Last seen: <span data-key="last_update">{{ d.last_update|date:"d/m/Y H:i:s"|default:"—" }}</span></p>
+      <p data-key="peripherals" class="muted"{% if d.mode != "HEADLESS" %} hidden{% endif %}>Ngoại vi chưa kết nối.</p>
     </article>
   {% empty %}<p>Chưa có thiết bị.</p>{% endfor %}
   </section>
@@ -51,7 +53,7 @@ async function refreshDevices() {
     if (!response.ok) return;
     const body = await response.json();
     body.devices.forEach(d => {
-      const card = document.querySelector(`[data-device="${CSS.escape(d.device_id)}"]`);
+      const card = document.querySelector(`[data-device="${CSS.escape(d.routing_id)}"]`);
       if (!card) { location.reload(); return; }
       const badge = card.querySelector('.badge');
       badge.textContent = d.online ? 'ONLINE' : 'OFFLINE';
@@ -60,7 +62,11 @@ async function refreshDevices() {
       card.querySelectorAll('[data-key]').forEach(element => {
         const key = element.dataset.key;
         let value = d[key];
-        if (value && ['last_update', 'last_heartbeat'].includes(key)) value = new Date(value).toLocaleString();
+        if (['last_update', 'last_heartbeat'].includes(key)) value = d[key + '_display'];
+        if (key === 'peripherals') {
+          element.hidden = d.mode !== 'HEADLESS';
+          return;
+        }
         if (key === 'relay_on' && typeof value === 'boolean') value = value ? 'ON' : 'OFF';
         element.textContent = value === '' ? '—' : (value ?? '—');
       });

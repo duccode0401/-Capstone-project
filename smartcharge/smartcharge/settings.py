@@ -88,6 +88,7 @@ WSGI_APPLICATION = 'smartcharge.wsgi.application'
 MQTT_PUBLIC_TEST_MODE = os.environ.get("MQTT_PUBLIC_TEST_MODE", "").strip().lower() == "true"
 MQTT_DEVICE_ID = os.environ.get("MQTT_DEVICE_ID", "ESP32_001").strip()
 MQTT_PUBLIC_TEST_DEVICE = os.environ.get("MQTT_PUBLIC_TEST_DEVICE", "").strip()
+MQTT_PUBLIC_TEST_LOGICAL_DEVICE = os.environ.get("MQTT_PUBLIC_TEST_LOGICAL_DEVICE", MQTT_DEVICE_ID).strip()
 
 DATABASES = {
     'default': {
@@ -119,9 +120,10 @@ AUTH_PASSWORD_VALIDATORS = [
 # Internationalization
 # https://docs.djangoproject.com/en/5.2/topics/i18n/
 
-LANGUAGE_CODE = 'en-us'
+LANGUAGE_CODE = "vi"
+FORMAT_MODULE_PATH = "smartcharge.formats"
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = "Asia/Ho_Chi_Minh"
 
 USE_I18N = True
 
@@ -136,6 +138,7 @@ MEDIA_ROOT = BASE_DIR / "media-private"
 
 # OTA/monitoring
 OTA_DEVICE_KEYS_JSON = os.environ.get("OTA_DEVICE_KEYS_JSON", "{}")
+OTA_DEVICE_TRUST_BASES_JSON = os.environ.get("OTA_DEVICE_TRUST_BASES_JSON", "{}")
 OTA_DOWNLOAD_TTL_SECONDS = int(os.environ.get("OTA_DOWNLOAD_TTL_SECONDS", "7200"))
 OTA_STATUS_TIMEOUT_SECONDS = int(os.environ.get("OTA_STATUS_TIMEOUT_SECONDS", "900"))
 DEVICE_STALE_SECONDS = int(os.environ.get("DEVICE_STALE_SECONDS", "30"))

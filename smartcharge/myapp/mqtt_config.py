@@ -8,6 +8,9 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 
 
+from .device_identity import DEVICE_ID_PATTERN
+
+
 PUBLIC_TEST_HOST = "broker.emqx.io"
 PUBLIC_TEST_PORT = 8883
 
@@ -16,6 +19,8 @@ def public_test_topics():
     device = settings.MQTT_PUBLIC_TEST_DEVICE
     if not re.fullmatch(r"SC_TEST_[a-f0-9]{16}", device):
         raise ValidationError("MQTT_PUBLIC_TEST_DEVICE must be a provisioning alias.")
+    if not DEVICE_ID_PATTERN.fullmatch(settings.MQTT_PUBLIC_TEST_LOGICAL_DEVICE):
+        raise ValidationError("MQTT_PUBLIC_TEST_LOGICAL_DEVICE must be a valid logical Device ID.")
     base = f"iot/charge_station/test/{device}"
     return f"{base}/telemetry", f"{base}/logs"
 
@@ -26,6 +31,8 @@ def public_test_heartbeat_topic():
 
 
 def ack_topic(device):
+    if not isinstance(device, str) or not DEVICE_ID_PATTERN.fullmatch(device):
+        raise ValidationError("Invalid MQTT ACK device.")
     if settings.MQTT_PUBLIC_TEST_MODE:
         if device != settings.MQTT_PUBLIC_TEST_DEVICE:
             raise ValidationError("Unexpected public MQTT ACK device.")

@@ -3,6 +3,8 @@ import json
 import uuid
 
 from django.conf import settings
+
+from .device_identity import logical_device_id
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
@@ -30,8 +32,29 @@ class ChargerDevice(models.Model):
     mqtt_last_error = models.CharField(max_length=32, blank=True)
     ota_sequence = models.PositiveBigIntegerField(default=0)
 
-    def __str__(self):
+    @property
+    def logical_id(self):
+        return logical_device_id(self.device_id)
+
+    @property
+    def display_label(self):
+        if self.logical_id != self.device_id:
+            return f"{self.logical_id} ({self.device_id})"
         return self.device_id
+
+    @property
+    def running_version(self):
+        health = self.mqtt_health
+        if (health.get("mode") != "RECOVERY" and health.get("firmware_version")
+                and self.last_heartbeat_at
+                and (not self.firmware_confirmed_at or self.last_heartbeat_at >= self.firmware_confirmed_at)):
+            return health["firmware_version"]
+        return self.firmware_version
+
+    firmware_confirmed_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return self.display_label
 
 
 class ChargingSession(models.Model):
@@ -66,7 +89,7 @@ class ChargingSession(models.Model):
 
     @property
     def device_id_str(self):
-        return self.device.device_id if self.device else "N/A"
+        return self.device.logical_id if self.device else "N/A"
 
     def __str__(self):
         return f"#{self.id} {self.device_id_str} P{self.port_no} {self.amount_vnd} {self.status}"
@@ -234,8 +257,40 @@ class OTAJob(models.Model):
     def is_terminal(self):
         return self.status in self.TERMINAL_STATUSES
 
+    @property
+    def stage(self):
+        if self.status == self.STATUS_REBOOTING:
+            if self.progress == 0:
+                return "Rebooting to Recovery"
+            device = self.device
+            if (self.last_status_at and device.last_heartbeat_at
+                    and device.last_heartbeat_at >= self.last_status_at
+                    and device.mqtt_health.get("mode") == "NORMAL"
+                    and device.mqtt_health.get("firmware_version") == self.firmware.version):
+                return "Health Check"
+        return self.get_status_display().replace("_", " ").title()
+
     def __str__(self):
         return f"{self.request_id}: {self.device} → {self.firmware.version}"
+
+
+class OTAProgressEvent(models.Model):
+    job = models.ForeignKey(OTAJob, on_delete=models.CASCADE, related_name="progress_events")
+    status = models.CharField(max_length=20, choices=OTAJob.STATUS_CHOICES)
+    progress = models.PositiveSmallIntegerField()
+    reason = models.CharField(max_length=40, blank=True)
+    received_at = models.DateTimeField()
+
+    class Meta:
+        ordering = ["pk"]
+
+    @property
+    def stage(self):
+        if self.status == OTAJob.STATUS_REBOOTING and self.progress == 0:
+            return "Rebooting to Recovery"
+        if self.status == OTAJob.STATUS_RECOVERING:
+            return "Recovery"
+        return self.get_status_display().replace("_", " ").title()
 
 
 class DeviceTelemetry(models.Model):
@@ -316,9 +371,33 @@ class MqttAttempt(models.Model):
     ack_status = models.CharField(max_length=20, default="NOT_SENT")
     error_code = models.CharField(max_length=32, blank=True)
     duration_ms = models.PositiveIntegerField()
+    ack_published_at = models.DateTimeField(null=True, blank=True)
+    ack_confirmed_at = models.DateTimeField(null=True, blank=True)
+
+    @property
+    def logical_id(self):
+        return logical_device_id(self.device_id)
 
     class Meta:
         ordering = ["-received_at", "-pk"]
+
+    @property
+    def short_message_id(self):
+        if len(self.message_id) > 12:
+            return f"{self.message_id[:6]}…{self.message_id[-5:]}"
+        return self.message_id
+
+    @property
+    def summary(self):
+        if self.error_code:
+            return self.error_code
+        if self.message_type == "heartbeat":
+            version = self.payload.get("firmware_version", "—")
+            mode = self.payload.get("mode", "—")
+            return f"FW {version} · {mode}"
+        if self.message_type == "ota":
+            return self.payload.get("status", "OTA")
+        return self.payload.get("event") or self.payload.get("status") or self.message_type.upper()
 
     @property
     def display_payload(self):

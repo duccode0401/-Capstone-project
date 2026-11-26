@@ -1,5 +1,6 @@
 from django import forms
 from django.contrib import admin, messages
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, OperationalError, transaction
 from django.http import HttpResponseRedirect
@@ -19,7 +20,7 @@ from .ota_services import prepare_ota, publish_ota, validate_device_ready_for_ot
 @admin.register(ChargerDevice)
 class ChargerDeviceAdmin(admin.ModelAdmin):
     list_display = (
-        "device_id", "name", "firmware_version", "last_seen_at", "ota_sequence"
+        "logical_id", "device_id", "name", "running_version", "last_seen_at", "ota_sequence"
     )
     search_fields = ("device_id", "name")
     readonly_fields = ("last_seen_at", "firmware_version", "ota_sequence")
@@ -122,7 +123,7 @@ class OTAJobAdmin(admin.ModelAdmin):
         return ()
 
     def has_add_permission(self, request):
-        return super().has_add_permission(request) and request.user.has_perm(
+        return not settings.MQTT_PUBLIC_TEST_MODE and super().has_add_permission(request) and request.user.has_perm(
             "myapp.deploy_firmware"
         )
 

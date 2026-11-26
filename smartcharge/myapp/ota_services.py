@@ -15,12 +15,12 @@ from django.db.models import Q
 from django.utils import timezone
 
 from .mqtt_config import mqtt_connection, publish_once
+from .device_identity import DEVICE_ID_PATTERN
 from .firmware_validation import MAIN_SLOT_SIZE, version_parts
-from .models import ChargerDevice, ChargingSession, DeviceTelemetry, FirmwareArtifact, OTAJob
+from .models import ChargerDevice, ChargingSession, DeviceTelemetry, FirmwareArtifact, OTAJob, OTAProgressEvent
 
 
 OTA_COMMAND_TOPIC = "iot/charge_station/v1/ota/command"
-DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,31}$")
 ACTIVE_CHARGING_STATUSES = ("assigned", "charging")
 
 
@@ -66,9 +66,10 @@ def validate_device_ready_for_ota(device, firmware, now=None, *, issuing_job=Non
     now = now or timezone.now()
     if not DEVICE_ID_PATTERN.fullmatch(device.device_id):
         raise ValidationError("Device ID không hợp lệ.")
+    latest = DeviceTelemetry.objects.filter(device=device).order_by("-received_at").first()
     target_version = version_parts(firmware.version)
-    current_version = version_parts(device.firmware_version)
-    if not target_version or (current_version and target_version <= current_version):
+    current_version = version_parts(device.running_version or (latest.firmware_version if latest else ""))
+    if not target_version or not current_version or target_version <= current_version:
         raise ValidationError("Firmware version must be X.Y.Z and newer than the known device version.")
     if issuing_job is None and device.ota_sequence >= 2**32 - 1:
         raise ValidationError("ESP32 OTA sequence exhausted.")
@@ -91,7 +92,6 @@ def validate_device_ready_for_ota(device, firmware, now=None, *, issuing_job=Non
     ).exclude(pk=issuing_job).exists():
         raise ValidationError("Thiết bị đã có OTAJob chưa kết thúc.")
 
-    latest = DeviceTelemetry.objects.filter(device=device).order_by("-received_at").first()
     if latest is None:
         raise ValidationError("Chưa có telemetry để xác định thiết bị đang rảnh.")
     stale_before = now - timedelta(seconds=settings.DEVICE_STALE_SECONDS)
@@ -100,7 +100,20 @@ def validate_device_ready_for_ota(device, firmware, now=None, *, issuing_job=Non
     if latest.charging or latest.charging_status not in {"IDLE", "DONE"}:
         raise ValidationError("Trạng thái thiết bị đang sạc hoặc không xác định.")
 
-    _https_base_url()
+    if device.last_heartbeat_at:
+        health = device.mqtt_health
+        if (device.last_heartbeat_at < stale_before or health.get("mode") != "NORMAL"
+                or health.get("mqtt_connected") is not True or health.get("relay_on") is not False):
+            raise ValidationError("OTA requires a recent NORMAL heartbeat with MQTT connected and relay OFF.")
+
+    base = _https_base_url()
+    try:
+        trust_bases = json.loads(settings.OTA_DEVICE_TRUST_BASES_JSON)
+        provisioned = trust_bases.get(device.device_id) if isinstance(trust_bases, dict) else None
+    except (TypeError, json.JSONDecodeError):
+        provisioned = None
+    if provisioned not in (base, base + "/"):
+        raise ValidationError("The HTTPS download base must match this device's provisioned trust_base.")
     _device_key(device.device_id)
     mqtt_connection()
     if settings.OTA_DOWNLOAD_TTL_SECONDS <= 0:
@@ -285,6 +298,19 @@ def build_manifest(job, raw_token):
     }
 
 
+OTA_FAILURE_REASONS = {
+    "NO_NETWORK", "DOWNLOAD_FAILED", "VERIFY_FAILED", "INSTALL_FAILED", "ROLLBACK",
+    "MANIFEST_INVALID", "MANIFEST_DOWNLOAD", "MANIFEST_SIGNATURE", "VERSION_MISMATCH",
+    "SHA256_MISMATCH", "SIZE_MISMATCH", "BOOT_SELECTION", "RETRY_EXHAUSTED",
+    "HTTPS_TLS_OR_CONNECT_FAILED", "HTTPS_DOWNLOAD_INTERRUPTED", "HTTPS_REDIRECT_REJECTED",
+    "HTTPS_AUTH_OR_CAPABILITY_EXPIRED", "HTTPS_STATUS_NOT_200", "HTTPS_CHUNKED_NOT_SUPPORTED",
+    "HTTPS_CONTENT_LENGTH_INVALID", "HTTPS_HTML_OR_NGROK_WARNING", "HTTPS_CONTENT_TYPE_INVALID",
+    "HTTPS_CONTENT_ENCODING_REJECTED", "ESP_IMAGE_PREFIX_INVALID", "MANIFEST_JSON_PREFIX_INVALID",
+    "HTTPS_RESPONSE_INVALID", "ESP_ERR_OTA_VALIDATE_FAILED", "ESP_ERR_INVALID_VERSION",
+    "ESP_ERR_INVALID_SIZE", "ESP_ERR_INVALID_RESPONSE", "ESP_ERR_TIMEOUT", "ESP_ERR_NO_MEM",
+}
+
+
 # Recovery emits progress on a best-effort connection. Allow forward jumps
 # during an attempt and a reset when Recovery starts another attempt.
 STATUS_ORDER = {
@@ -310,7 +336,7 @@ def process_ota_status(data):
     status = data["status"]
     version = data["version"]
     progress = data["progress"]
-    if not DEVICE_ID_PATTERN.fullmatch(str(device_id)):
+    if not isinstance(device_id, str) or not DEVICE_ID_PATTERN.fullmatch(device_id):
         raise ValidationError("Device ID không hợp lệ.")
     if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,63}", request_id):
         raise ValidationError("Invalid OTA request_id.")
@@ -338,12 +364,19 @@ def process_ota_status(data):
             raise ValidationError("SUCCESS must report 100 percent progress.")
         if status == OTAJob.STATUS_REJECTED_BUSY and job.status != OTAJob.STATUS_PENDING:
             raise ValidationError("REJECTED_BUSY is only valid before acceptance.")
-        if status == job.status and progress == job.progress:
+        reason = str(data.get("error", ""))
+        # Current Recovery emits machine-readable reasons. Store only known codes.
+        reason = reason if reason in OTA_FAILURE_REASONS else ""
+        previous = job.progress_events.order_by("-pk").first()
+        if (previous and previous.status == status and previous.progress == progress
+                and previous.reason == reason):
+            return job, False
+        if not previous and status == job.status and progress == job.progress:
             return job, False
         if status == OTAJob.STATUS_DOWNLOADING and job.status == status and progress < job.progress:
             raise ValidationError("OTA download progress moved backwards.")
         restarting = status == OTAJob.STATUS_RECOVERING or (
-            job.status == OTAJob.STATUS_REBOOTING
+            job.status == OTAJob.STATUS_REBOOTING and job.progress == 0
             and status in {OTAJob.STATUS_DOWNLOADING, OTAJob.STATUS_VERIFYING, OTAJob.STATUS_INSTALLING}
         )
         if not restarting and STATUS_ORDER.get(status, 8) < STATUS_ORDER[job.status]:
@@ -353,7 +386,7 @@ def process_ota_status(data):
         # FAILED after entering Recovery can mean the download will be retried.
         # The firmware uses the same FAILED payload after exhausting boot attempts.
         # Keep the capability and active-job lock until timeout or confirmation.
-        recovery_failure = status == OTAJob.STATUS_FAILED and (
+        recovery_failure = status == OTAJob.STATUS_FAILED and "error" not in data and (
             job.status in {
                 OTAJob.STATUS_RECOVERING, OTAJob.STATUS_DOWNLOADING,
                 OTAJob.STATUS_VERIFYING, OTAJob.STATUS_INSTALLING,
@@ -366,7 +399,7 @@ def process_ota_status(data):
         job.last_status_at = now
         job.error_message = (
             "FAILED: Recovery reported an error and may retry." if recovery_failure
-            else str(data.get("error", ""))[:500]
+            else (reason or ("Thiết bị báo lỗi OTA." if status == OTAJob.STATUS_FAILED else ""))
         )
         job.save(
             update_fields=[
@@ -374,9 +407,12 @@ def process_ota_status(data):
                 "error_message", "updated_at",
             ]
         )
+        OTAProgressEvent.objects.create(
+            job=job, status=status, progress=progress, reason=reason, received_at=now,
+        )
         ChargerDevice.objects.filter(pk=job.device_id).update(
             last_seen_at=now,
-            **({"firmware_version": version} if status == OTAJob.STATUS_SUCCESS else {}),
+            **({"firmware_version": version, "firmware_confirmed_at": now} if status == OTAJob.STATUS_SUCCESS else {}),
         )
         return job, True
 

@@ -23,6 +23,7 @@ from django.contrib.admin.views.decorators import staff_member_required
 from django.db import OperationalError, transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
+from django.db.models import Q
 
 
 from .models import (
@@ -393,7 +394,7 @@ def _device_snapshot(device, now):
         .first()
     )
     health = device.mqtt_health
-    if health.get("mode") == "HEADLESS":
+    if health.get("mode") in {"HEADLESS", "RECOVERY"}:
         telemetry = None
     activity = device.last_heartbeat_at or device.last_seen_at
     stale = (
@@ -402,10 +403,16 @@ def _device_snapshot(device, now):
         < now - timedelta(seconds=settings.DEVICE_STALE_SECONDS)
     )
     return {
-        "device_id": device.device_id,
+        "device_id": device.logical_id,
+        "routing_id": device.device_id,
+        "display_label": device.display_label,
+        "rx_count": device.mqtt_success_count + device.mqtt_failed_count + device.mqtt_duplicate_count,
         "name": device.name,
         "online": not stale,
-        "firmware_version": health.get("firmware_version") or device.firmware_version or "—",
+        "firmware_version": (
+            (health.get("firmware_version") if health.get("mode") == "RECOVERY" else device.running_version)
+            or (telemetry.firmware_version if telemetry else "") or "—"
+        ),
         "last_heartbeat": device.last_heartbeat_at,
         "minimum_heap": health.get("min_free_heap"),
         "uptime_ms": health.get("uptime_ms"),
@@ -440,70 +447,107 @@ def devices_dashboard(request):
     return render(request, "myapp/device_dashboard.html", {"devices": devices})
 
 
+LOG_CATEGORIES = ("BOOT", "WIFI", "MQTT", "HEARTBEAT", "TELEMETRY", "ACK", "ERROR", "OTA")
+LOG_EVENT_PREFIXES = {
+    "BOOT": ("BOOT", "HEALTHY", "REBOOT", "WATCHDOG"),
+    "WIFI": ("WIFI",),
+    "MQTT": ("MQTT",),
+    "OTA": ("OTA", "RECOVER"),
+}
+
+
+def _event_prefixes(field, prefixes):
+    condition = Q()
+    for prefix in prefixes:
+        condition |= Q(**{f"{field}__startswith": prefix})
+    return condition
+
+
+@require_GET
 @_staff_permission("myapp.view_devicelog")
 def device_logs_dashboard(request):
-    queryset = DeviceLog.objects.select_related("device")
     selected_device = request.GET.get("device", "")
-    selected_filter = request.GET.get("filter", "ALL").upper()
-    if selected_device:
-        queryset = queryset.filter(device__device_id=selected_device)
-    if selected_filter in {"INFO", "WARNING", "ERROR"}:
-        queryset = queryset.filter(level=selected_filter)
-    elif selected_filter == "OTA":
-        queryset = queryset.filter(event__startswith="OTA_")
-    elif selected_filter == "CHARGING":
-        queryset = queryset.filter(
-            event__in=[
-                "PAYMENT_RECEIVED", "CHARGING_STARTED", "CHARGE_COMPLETED",
-                "RELAY_ON", "RELAY_OFF",
-            ]
-        )
-    elif selected_filter != "ALL":
-        selected_filter = "ALL"
-    page = Paginator(queryset, 50).get_page(request.GET.get("page"))
-    now = timezone.now()
-    attempts = MqttAttempt.objects.filter(received_at__gte=now - timedelta(days=7))
+    category = request.GET.get("category", "")
+    kind = request.GET.get("type", "")
+    outcome = request.GET.get("outcome", "")
+    view = request.GET.get("view", "events" if "filter" in request.GET else "mqtt")
+    attempts = MqttAttempt.objects.filter(received_at__gte=timezone.now() - timedelta(days=7))
+    events = DeviceLog.objects.select_related("device")
     if selected_device:
         attempts = attempts.filter(device_id=selected_device)
-    kind = request.GET.get("type", "")
+        events = events.filter(device__device_id=selected_device)
     if kind in {"heartbeat", "telemetry", "logs", "status", "ota"}:
         attempts = attempts.filter(message_type=kind)
-    outcome = request.GET.get("outcome", "")
+        if kind != "logs":
+            events = events.none()
     if outcome in {"SUCCESS", "FAILED", "DUPLICATE"}:
         attempts = attempts.filter(status=outcome)
-    date_values = {}
-    for key, comparison in (("since", "gte"), ("until", "lte")):
+        if outcome != "SUCCESS":
+            events = events.none()
+
+    prefixes = LOG_EVENT_PREFIXES.get(category)
+    if prefixes:
+        attempt_filter = _event_prefixes("payload__event", prefixes)
+        if category == "OTA":
+            attempt_filter |= Q(message_type="ota")
+        attempts = attempts.filter(attempt_filter)
+        events = events.filter(_event_prefixes("event", prefixes))
+    elif category in {"HEARTBEAT", "TELEMETRY"}:
+        attempts = attempts.filter(message_type=category.lower())
+        events = events.none()
+    elif category == "ACK":
+        attempts = attempts.exclude(ack_status="NOT_SENT")
+        events = events.none()
+    elif category == "ERROR":
+        attempts = attempts.filter(
+            Q(status="FAILED") | Q(payload__level="ERROR")
+            | Q(ack_status__in=("PUBLISH_FAILED", "BROKER_REJECTED"))
+        )
+        events = events.filter(level="ERROR")
+
+    dates = {}
+    for key, lookup in (("since", "gte"), ("until", "lte")):
         raw = request.GET.get(key, "")[:40]
-        date_values[key] = raw
+        dates[key] = raw
         try:
             parsed = parse_datetime(raw)
-        except ValueError:
+            if parsed and timezone.is_naive(parsed):
+                parsed = timezone.make_aware(parsed, timezone.get_default_timezone())
+            if parsed:
+                parsed = parsed.astimezone(timezone.get_default_timezone())
+        except (ValueError, OverflowError):
             parsed = None
         if parsed:
-            if timezone.is_naive(parsed):
-                parsed = timezone.make_aware(parsed)
-            attempts = attempts.filter(**{f"received_at__{comparison}": parsed})
-    attempt_page = Paginator(attempts[:10000], 50).get_page(request.GET.get("mqtt_page"))
-    query = request.GET.copy()
-    query.pop("mqtt_page", None)
-    return render(
-        request,
-        "myapp/device_logs.html",
-        {
-            "page": page,
-            "attempt_page": attempt_page,
-            "mqtt_query": query.urlencode(),
-            "mqtt_type": kind,
-            "mqtt_types": ["heartbeat", "telemetry", "logs", "status", "ota"],
-            "mqtt_outcome": outcome,
-            "mqtt_outcomes": ["SUCCESS", "FAILED", "DUPLICATE"],
-            **date_values,
-            "devices": ChargerDevice.objects.order_by("device_id"),
-            "selected_device": selected_device,
-            "selected_filter": selected_filter,
-            "filters": ["ALL", "INFO", "WARNING", "ERROR", "OTA", "CHARGING"],
-        },
+            date_filter = {f"received_at__{lookup}": parsed}
+            attempts = attempts.filter(**date_filter)
+            events = events.filter(**date_filter)
+            dates[key] = parsed.isoformat(timespec="seconds")[:19]
+
+    legacy = view == "events"
+    if legacy:
+        level = request.GET.get("filter", "").upper()
+        if level in {"INFO", "WARNING", "ERROR"}:
+            events = events.filter(level=level)
+        elif level == "OTA":
+            events = events.filter(_event_prefixes("event", LOG_EVENT_PREFIXES["OTA"]))
+        elif level == "CHARGING":
+            events = events.filter(event__in=(
+                "PAYMENT_RECEIVED", "CHARGING_STARTED", "CHARGE_COMPLETED", "RELAY_ON", "RELAY_OFF",
+            ))
+    page = Paginator((events if legacy else attempts)[:10000], 50).get_page(
+        request.GET.get("page") or request.GET.get("mqtt_page")
     )
+    query = request.GET.copy()
+    for key in ("page", "mqtt_page", "view"):
+        query.pop(key, None)
+    return render(request, "myapp/device_logs.html", {
+        "page": page, "legacy": legacy, "query": query.urlencode(),
+        "category": category, "categories": LOG_CATEGORIES,
+        "mqtt_type": kind, "mqtt_outcome": outcome,
+        "outcomes": ["SUCCESS", "FAILED", "DUPLICATE"],
+        "devices": ChargerDevice.objects.order_by("device_id"),
+        "selected_device": selected_device, **dates,
+    })
 
 
 @require_GET
@@ -514,9 +558,11 @@ def device_status_api(request):
     for device in ChargerDevice.objects.all():
         item = _device_snapshot(device, now)
         for key in ("last_update", "last_heartbeat"):
-            item[key] = item[key].isoformat() if item[key] else None
+            local = timezone.localtime(item[key]) if item[key] else None
+            item[key] = local.isoformat() if local else None
+            item[f"{key}_display"] = local.strftime("%d/%m/%Y %H:%M:%S") if local else None
         payload.append(item)
-    return JsonResponse({"devices": payload, "server_time": now.isoformat()})
+    return JsonResponse({"devices": payload, "server_time": timezone.localtime(now).isoformat()})
 
 
 @require_GET
@@ -528,12 +574,13 @@ def recent_logs_api(request):
         queryset = queryset.filter(device__device_id=device_id)
     logs = [
         {
-            "device": log.device.device_id,
+            "device": log.device.logical_id,
+            "routing_id": log.device.device_id,
             "level": log.level,
             "event": log.event,
             "message": log.message,
             "uptime_ms": log.uptime_ms,
-            "received_at": log.received_at.isoformat(),
+            "received_at": timezone.localtime(log.received_at).isoformat(),
         }
         for log in queryset[:100]
     ]

@@ -14,13 +14,18 @@ from django.db import DatabaseError, transaction
 from django.db.models import F
 from django.utils import timezone
 
-from .iot_services import _optional_integer
-from .models import ChargerDevice, MqttAttempt, MqttReceipt
+from .iot_services import EVENT_PATTERN, _optional_integer
+from .models import ChargerDevice, MqttAttempt, MqttReceipt, OTAJob
 from .mqtt_config import ack_topic
-from .ota_services import DEVICE_ID_PATTERN, version_parts
+from .device_identity import DEVICE_ID_PATTERN
+from .ota_services import version_parts
 
 logger = logging.getLogger("smartcharge.mqtt_subscriber")
-MESSAGE_ID = re.compile(r"[a-fA-F0-9]{8}-[a-fA-F0-9]{8}")
+MESSAGE_ID = re.compile(r"(?:[a-f0-9]{16}-[a-f0-9]{8}|[a-fA-F0-9]{8}-[a-fA-F0-9]{8})")
+WIRE_TYPES = {
+    "telemetry": {"telemetry"}, "logs": {"log", "logs"}, "heartbeat": {"heartbeat"},
+    "status": {"status"}, "ota": {"ota_status"},
+}
 HEALTH_INTEGERS = {
     "uptime_ms": (0, 2**63 - 1),
     "free_heap": (0, 16 * 1024 * 1024),
@@ -33,10 +38,10 @@ HEALTH_FLAGS = ("mqtt_connected", "relay_on")
 HEALTH_ENUMS = {
     "sensor_status": {"DISABLED", "OK", "ERROR", "ENABLED", "READY", "FAILED", "UNKNOWN", "UNAVAILABLE", "FAULT"},
     "display_status": {"DISABLED", "OK", "ERROR", "ENABLED", "READY", "FAILED", "UNKNOWN", "UNAVAILABLE", "FAULT"},
-    "mode": {"HEADLESS", "NORMAL"},
+    "mode": {"HEADLESS", "NORMAL", "RECOVERY"},
 }
 NUMERIC_FIELDS = {
-    *HEALTH_INTEGERS, "protocol_version", "port", "voltage_v", "current_a", "power_w",
+    *HEALTH_INTEGERS, "progress", "protocol_version", "port", "voltage_v", "current_a", "power_w",
     "energy_total_wh", "energy_delta_wh", "interval_s", "heap_free_bytes", "rssi_dbm",
 }
 
@@ -65,14 +70,18 @@ def sanitized_payload(data):
         if type(data.get(key)) is bool:
             result[key] = data[key]
     for key, allowed in {
-        **HEALTH_ENUMS, "status": {"IDLE", "CHARGING", "DONE"},
+        **HEALTH_ENUMS, "status": {"IDLE", "CHARGING", "DONE", *(key for key, _ in OTAJob.STATUS_CHOICES)},
         "level": {"INFO", "WARN", "WARNING", "ERROR"},
-        "message_type": {"telemetry", "logs", "heartbeat", "status", "ota"},
+        "message_type": set().union(*WIRE_TYPES.values()),
     }.items():
         if isinstance(data.get(key), str) and data[key] in allowed:
             result[key] = data[key]
     if _firmware(data.get("firmware_version")):
         result["firmware_version"] = data["firmware_version"]
+    if _matches(EVENT_PATTERN, data.get("event")):
+        result["event"] = data["event"]
+    if _firmware(data.get("version")):
+        result["version"] = data["version"]
     if "message" in data:
         result["message"] = "[REDACTED]"
     return result
@@ -105,7 +114,12 @@ def _ack_state(attempt_id, state):
     if attempt_id is None:
         return
     try:
-        MqttAttempt.objects.filter(pk=attempt_id).update(ack_status=state)
+        timestamps = {}
+        if state == "QUEUED":
+            timestamps["ack_published_at"] = timezone.now()
+        elif state in {"BROKER_CONFIRMED", "BROKER_REJECTED"}:
+            timestamps["ack_confirmed_at"] = timezone.now()
+        MqttAttempt.objects.filter(pk=attempt_id).update(ack_status=state, **timestamps)
     except DatabaseError:
         logger.error("[DB] ACK status update failed")
 
@@ -154,10 +168,13 @@ def ingest(client, topic, kind, data, dispatch, *, invalid_json=False):
     message_id = data.get("message_id")
     valid_device = _matches(DEVICE_ID_PATTERN, device)
     valid_id = _matches(MESSAGE_ID, message_id)
-    v2 = any(key in data for key in ("protocol_version", "message_id", "message_type"))
+    v2 = "protocol_version" in data or "message_id" in data
     public = settings.MQTT_PUBLIC_TEST_MODE
     safe_route = valid_device and (not public or device == settings.MQTT_PUBLIC_TEST_DEVICE)
-    versioned_kind = kind in {"telemetry", "logs", "status", "heartbeat"}
+    versioned_kind = kind in WIRE_TYPES
+    wire_type = data.get("message_type")
+    valid_type = isinstance(wire_type, str) and wire_type in WIRE_TYPES.get(kind, ())
+    ack_type = wire_type if valid_type else {"logs": "log", "ota": "ota_status"}.get(kind, kind)
     can_ack = v2 and versioned_kind and safe_route and valid_id and data.get("message_type") != "ack"
     audit = {
         "received_at": received_at, "device_id": device if valid_device else "",
@@ -175,7 +192,7 @@ def ingest(client, topic, kind, data, dispatch, *, invalid_json=False):
     def reply(attempt_id, error=None, retryable=False):
         if can_ack:
             transaction.on_commit(lambda: publish_ack(
-                client, attempt_id, device, message_id, kind, error, retryable,
+                client, attempt_id, device, message_id, ack_type, error, retryable,
             ))
 
     error = None
@@ -192,7 +209,7 @@ def ingest(client, topic, kind, data, dispatch, *, invalid_json=False):
                 raise Rejected("UNSUPPORTED_PROTOCOL")
             if not valid_id:
                 raise Rejected("INVALID_MESSAGE_ID")
-            if data.get("message_type") != kind:
+            if not valid_type:
                 raise Rejected("INVALID_MESSAGE_TYPE")
             if _optional_integer(data, "uptime_ms", 0, 2**63 - 1) is None:
                 raise Rejected("INVALID_PAYLOAD")

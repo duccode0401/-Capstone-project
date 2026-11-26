@@ -24,3 +24,41 @@ th { background: #eef3f8; font-size: 13px; }
 .level-INFO { color: #175cd3; }
 .pagination { margin-top: 16px; display: flex; gap: 12px; align-items: center; }
 @media (max-width: 700px) { .topbar { align-items: flex-start; flex-direction: column; } table { font-size: 12px; } }
+
+.tabs { display: flex; flex-wrap: wrap; gap: 18px; margin: 16px 0; }
+.tabs a { color: #1769aa; padding-bottom: 5px; text-decoration: none; }
+.tabs [aria-current] { border-bottom: 2px solid currentColor; font-weight: 700; }
+.filters label { display: grid; gap: 5px; min-width: 0; font-size: 13px; }
+.filters input, .filters select { max-width: 100%; box-sizing: border-box; }
+.filters input { border: 1px solid #cbd5e1; border-radius: 7px; padding: 7px; }
+.filters button { align-self: end; cursor: pointer; }
+.filters button:disabled { cursor: not-allowed; opacity: .6; }
+.responsive-table { table-layout: fixed; }
+.responsive-table td, .responsive-table th, .metric strong { overflow-wrap: anywhere; }
+.log-table th:nth-child(5), .log-table th:nth-child(7) { width: 14%; }
+.log-table th:first-child { width: 12%; }
+.log-table th:nth-child(8) { width: 6%; }
+.log-table details[open] { min-width: 0; }
+.payload { display: block; white-space: pre-wrap; overflow-wrap: anywhere; background: #eef3f8; padding: 8px; }
+summary { cursor: pointer; color: #1769aa; }
+.state-SUCCESS { color: #067647; font-weight: 700; }
+.state-FAILED { color: #b42318; font-weight: 700; }
+.state-DUPLICATE { color: #915907; font-weight: 700; }
+.refresh-toggle { font-size: 13px; }
+.ota-details { overflow-wrap: anywhere; }
+.ota-details progress { width: 100%; max-width: 360px; }
+.ota-events { padding-left: 24px; }
+.ota-events li { margin-bottom: 8px; }
+.notice { padding: 12px; border-left: 4px solid #b54708; background: #fff7e6; }
+@media (max-width: 850px) {
+  .responsive-table, .responsive-table tbody { display: block; }
+  .responsive-table thead { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); overflow: hidden; }
+  .responsive-table tr { display: block; border: 1px solid #e3e8ef; margin-bottom: 12px; }
+  .responsive-table td { display: grid; grid-template-columns: 8em minmax(0,1fr); gap: 8px; }
+  .responsive-table td[data-label]::before { content: attr(data-label); font-weight: 700; color: #667085; }
+  .responsive-table td[colspan] { display: block; }
+}
+@media (max-width: 400px) {
+  .cards { grid-template-columns: minmax(0,1fr); }
+  .nav a { margin-left: 0; margin-right: 10px; }
+}

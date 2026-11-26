@@ -26,6 +26,7 @@ Dùng alias chính xác đã cấp cho ESP32. Giá trị dưới đây là ví d
 ```dotenv
 MQTT_PUBLIC_TEST_MODE=true
 MQTT_PUBLIC_TEST_DEVICE=SC_TEST_0123456789abcdef
+MQTT_PUBLIC_TEST_LOGICAL_DEVICE=ESP32_001
 ```
 
 Subscriber kết nối TLS ẩn danh đến `broker.emqx.io:8883`, nhận ba topic `telemetry`, `logs` và `heartbeat` dưới `iot/charge_station/test/<alias>/`. ACK phát trên `iot/charge_station/test/<alias>/ack`. Payload `device` phải trùng alias. Firmware legacy vẫn dùng được khi gửi telemetry và log lên topic của alias. Chế độ này dùng `db-public-test.sqlite3` và khóa đường gửi lệnh sạc, OTA và xử lý SePay. Broker công cộng chỉ dùng cho thử nghiệm.
@@ -56,7 +57,7 @@ Chạy từng lệnh từ thư mục `smartcharge`. Sau khi đổi chế độ, 
 .\.venv\Scripts\python.exe manage.py check
 .\.venv\Scripts\python.exe manage.py migrate
 .\.venv\Scripts\python.exe manage.py createsuperuser
-.\.venv\Scripts\python.exe manage.py runserver 127.0.0.1:8000
+.\.venv\Scripts\python.exe manage.py runserver --insecure 127.0.0.1:8000
 ```
 
 Mở PowerShell thứ hai trong cùng thư mục. Chạy một tiến trình subscriber cho mỗi môi trường.
@@ -67,13 +68,13 @@ Mở PowerShell thứ hai trong cùng thư mục. Chạy một tiến trình sub
 
 - Đăng nhập tại [Django Admin](http://127.0.0.1:8000/admin/).
 - Xem sức khỏe thiết bị tại [Device Dashboard](http://127.0.0.1:8000/dashboard/devices/).
-- Xem, lọc và phân trang kết quả MQTT tại [Device Logs](http://127.0.0.1:8000/dashboard/logs/). Bộ lọc thời gian dùng UTC. Trang hiển thị tối đa 10.000 kết quả mới nhất trong 7 ngày.
+- Xem, lọc và phân trang kết quả MQTT tại [Device Logs](http://127.0.0.1:8000/dashboard/logs/). Bộ lọc thời gian dùng giờ Việt Nam (UTC+7). Trang hiển thị tối đa 10.000 kết quả mới nhất trong 7 ngày.
 
 ## 4. Kiểm tra với ESP32
 
 1. Bật ESP32 ở chế độ đã chọn. Sau `[MQTT] CONNECTED` và `[MQTT] SUBSCRIBED`, kiểm tra `[RX] TYPE=HEARTBEAT` khoảng 10 giây một lần. Dashboard hiển thị firmware, heap, RSSI và thời điểm heartbeat gần nhất.
 2. Với heartbeat hợp lệ, đối chiếu Message ID trong Device Logs và trên ESP32. Subscriber ghi `[DB] COMMIT SUCCESS`, `[TX] ACK SUCCESS` rồi `[MQTT] ACK PUBACK`. Trạng thái `BROKER_CONFIRMED` xác nhận broker đã phản hồi. Kiểm tra log hoặc MQTT client phía ESP32 để xác nhận thiết bị đã nhận ACK.
-3. Gửi heartbeat với ID hợp lệ mới và `relay_on` là chuỗi `"false"`. Kết quả phải là `FAILED`, `INVALID_PAYLOAD` và `retryable=false`. Dùng ID có mẫu `a83f921b-00000001` và đúng Device ID để backend có thể định tuyến phản hồi.
+3. Gửi heartbeat với ID hợp lệ mới và `relay_on` là chuỗi `"false"`. Kết quả phải là `FAILED`, `INVALID_PAYLOAD` và `retryable=false`. Dùng ID có mẫu `0123456789abcdef-00000001` và đúng Device ID để backend có thể định tuyến phản hồi.
 4. Gửi lại nguyên payload hợp lệ, gồm cùng Message ID. Kết quả phải là `DUPLICATE` và ACK `SUCCESS`. Đổi một giá trị trên chính payload đó với cùng ID để kiểm tra `MESSAGE_ID_CONFLICT`. Giữ các payload thử nghiệm ở môi trường kiểm thử.
 5. Tắt ESP32 hoặc ngắt mạng lâu hơn `DEVICE_STALE_SECONDS`. Dashboard chuyển OFFLINE ở lần làm mới kế tiếp. Thiết bị legacy dùng thời gian hoạt động gần nhất cho đến heartbeat v2 đầu tiên. Dashboard để trống thông số đo của thiết bị HEADLESS.
 6. Khi mô phỏng database lỗi tạm thời, kiểm tra ACK `FAILED` với `DATABASE_ERROR` và `retryable=true`. Sau khi database phục hồi, gửi lại nguyên payload. Firmware legacy thiếu Message ID tiếp tục được xử lý theo giao thức cũ.
@@ -97,3 +98,5 @@ Test-NetConnection broker.emqx.io -Port 8883
 .\.venv\Scripts\python.exe manage.py makemigrations --check --dry-run
 .\.venv\Scripts\python.exe manage.py test
 ```
+
+Xem [hướng dẫn OTA từ build đến phục hồi](WEB_OTA_GUIDE.md) để cấu hình Secure mode, xác minh trust base và triển khai application .bin.

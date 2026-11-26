@@ -41,6 +41,7 @@ PUBLIC_TEST_EVENTS = {
     "BOOTSTRAP_FAILED": ("ERROR", "Preloaded application invalid"),
     "HEALTHY": ("INFO", "Application startup health checks passed"),
     "HEAP_LOW": ("WARN", "Internal RAM pressure"),
+    "MQTT_ERROR": ("WARN", "MQTT transport error"),
     "MQTT_CONNECTED": ("INFO", "MQTT session connected"),
     "MQTT_DISCONNECTED": ("WARN", "MQTT session disconnected"),
     "REBOOT_REASON": ("INFO", "Device restarted"),
