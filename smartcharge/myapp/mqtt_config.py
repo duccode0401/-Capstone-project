@@ -15,9 +15,23 @@ PUBLIC_TEST_PORT = 8883
 def public_test_topics():
     device = settings.MQTT_PUBLIC_TEST_DEVICE
     if not re.fullmatch(r"SC_TEST_[a-f0-9]{16}", device):
-        raise ValidationError("Set MQTT_PUBLIC_TEST_DEVICE to the alias printed by provisioning.")
+        raise ValidationError("MQTT_PUBLIC_TEST_DEVICE must be a provisioning alias.")
     base = f"iot/charge_station/test/{device}"
     return f"{base}/telemetry", f"{base}/logs"
+
+
+def public_test_heartbeat_topic():
+    telemetry, _ = public_test_topics()
+    return telemetry.rsplit("/", 1)[0] + "/heartbeat"
+
+
+def ack_topic(device):
+    if settings.MQTT_PUBLIC_TEST_MODE:
+        if device != settings.MQTT_PUBLIC_TEST_DEVICE:
+            raise ValidationError("Unexpected public MQTT ACK device.")
+        return public_test_heartbeat_topic().rsplit("/", 1)[0] + "/ack"
+    return f"iot/charge_station/v1/ack/{device}"
+
 
 
 def mqtt_connection(*, subscribe_only=False):

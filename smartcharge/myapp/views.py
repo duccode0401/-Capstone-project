@@ -1,4 +1,5 @@
 import json
+import logging
 import requests
 import os
 import time
@@ -21,8 +22,8 @@ from django.views.decorators.http import require_GET
 from django.contrib.admin.views.decorators import staff_member_required
 from django.db import OperationalError, transaction
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
-import paho.mqtt.publish as mqtt_publish  # <--- THÊM DÒNG NÀY
 
 from .models import (
     ChargingSession,
@@ -30,10 +31,12 @@ from .models import (
     ChargerPort,
     DeviceLog,
     DeviceTelemetry,
+    MqttAttempt,
     OTAJob,
+    PaymentOrder,
 )
 from .ota_services import authorize_job_token, build_manifest
-from .mqtt_config import mqtt_connection
+from .mqtt_config import mqtt_connection, publish_once
 
 # ====================== MQTT CONFIG ======================
 MQTT_TOPIC_ORDER = "iot/charge_station/v1/orders"
@@ -117,15 +120,22 @@ def assign_session_to_free_slot(session: ChargingSession):
             .order_by("device__device_id", "port_no")
         )
 
+        selected_port = PaymentOrder.objects.filter(session=session).values("port_id")
+        if selected_port.exists():
+            ports = ports.filter(pk__in=selected_port)
         for port in ports:
+            # OTA preparation takes the same device lock before assessing idle state.
+            device = ChargerDevice.objects.select_for_update().get(pk=port.device_id)
+            if OTAJob.objects.filter(device=device).exclude(status__in=OTAJob.TERMINAL_STATUSES).exists():
+                continue
             has_active = ChargingSession.objects.filter(
-                device=port.device,
+                device=device,
                 port_no=port.port_no,
                 status__in=ACTIVE_STATUSES,
             ).exists()
 
             if not has_active:
-                session.device = port.device
+                session.device = device
                 session.port_no = port.port_no
                 session.status = "assigned"
                 session.save(update_fields=["device", "port_no", "status", "updated_at"])
@@ -182,6 +192,7 @@ def publish_start_once(session: ChargingSession):
     """Gửi START tối đa một lần sau khi session đã được gán hợp lệ."""
     if settings.MQTT_PUBLIC_TEST_MODE:
         return False
+    connection = mqtt_connection()
     with transaction.atomic():
         session = (
             ChargingSession.objects.select_related("device").get(pk=session.pk)
@@ -206,18 +217,18 @@ def publish_start_once(session: ChargingSession):
 
     payload = f"{session.device.device_id} {session.port_no} {session.amount_vnd}"
     try:
-        mqtt_publish.single(
+        publish_once(
             MQTT_TOPIC_ORDER,
             payload,
             qos=1,
-            **mqtt_connection(),
+            retain=False,
+            **connection,
         )
-    except Exception:
-        # Cho phép retry nếu broker xác nhận publish thất bại. Nếu process chết
-        # giữa publish và phản hồi thì giao thức hiện tại không thể đảm bảo exactly-once.
-        ChargingSession.objects.filter(
-            pk=session.pk, mqtt_start_sent_at=claimed_at
-        ).update(mqtt_start_sent_at=None)
+    except (OSError, ValueError):
+        # A lost PUBACK is ambiguous. Firmware 1.0 cannot deduplicate START.
+        ChargingSession.objects.filter(pk=session.pk, mqtt_start_sent_at=claimed_at).update(
+            mqtt_start_delivery_unknown=True,
+        )
         raise
 
     return True
@@ -232,6 +243,8 @@ SEPAY_API_URL = "https://my.sepay.vn/userapi/transactions/list"
 def payment_view(request):
     if settings.MQTT_PUBLIC_TEST_MODE:
         return redirect("myapp:devices_dashboard")
+    if settings.SEPAY_WEBHOOK_API_KEY:
+        return redirect("myapp:payment_order")
     return render(request, "myapp/base.html")
 
 
@@ -240,8 +253,8 @@ def payment_baseline(request):
     Lấy 'mốc' giao dịch mới nhất hiện có cho số tiền đó.
     Frontend sẽ dùng baseline_id này để chỉ check giao dịch mới hơn.
     """
-    if settings.MQTT_PUBLIC_TEST_MODE:
-        return JsonResponse({"error": "Payment is disabled in public test mode."}, status=403)
+    if settings.MQTT_PUBLIC_TEST_MODE or settings.SEPAY_WEBHOOK_API_KEY:
+        return JsonResponse({"error": "Amount-only payment polling is disabled."}, status=403)
     try:
         amount = float(request.GET.get("amount", "0"))
     except ValueError:
@@ -289,8 +302,8 @@ def check_payment(request):
         } hoặc null
     }
     """
-    if settings.MQTT_PUBLIC_TEST_MODE:
-        return JsonResponse({"error": "Payment is disabled in public test mode."}, status=403)
+    if settings.MQTT_PUBLIC_TEST_MODE or settings.SEPAY_WEBHOOK_API_KEY:
+        return JsonResponse({"error": "Amount-only payment polling is disabled."}, status=403)
     try:
         # luôn ép về int VND cho chắc
         amount = int(float(request.GET.get("amount", "0")))
@@ -339,9 +352,9 @@ def check_payment(request):
             session = create_session_after_payment(amount, transaction_id)
             try:
                 publish_start_once(session)
-            except Exception as e:
+            except Exception:
                 # Session vẫn tồn tại và lần polling sau có thể retry START an toàn.
-                print(f"MQTT START publish failed for session {session.id}: {e}")
+                logging.getLogger(__name__).warning("MQTT START publish failed for session %s", session.id)
             processed_sessions.append(session)
 
         if not processed_sessions:
@@ -379,16 +392,33 @@ def _device_snapshot(device, now):
         .order_by("-received_at")
         .first()
     )
+    health = device.mqtt_health
+    if health.get("mode") == "HEADLESS":
+        telemetry = None
+    activity = device.last_heartbeat_at or device.last_seen_at
     stale = (
-        not device.last_seen_at
-        or device.last_seen_at
+        not activity
+        or activity
         < now - timedelta(seconds=settings.DEVICE_STALE_SECONDS)
     )
     return {
         "device_id": device.device_id,
         "name": device.name,
         "online": not stale,
-        "firmware_version": device.firmware_version or "—",
+        "firmware_version": health.get("firmware_version") or device.firmware_version or "—",
+        "last_heartbeat": device.last_heartbeat_at,
+        "minimum_heap": health.get("min_free_heap"),
+        "uptime_ms": health.get("uptime_ms"),
+        "reset_reason": health.get("reset_reason"),
+        "relay_on": health.get("relay_on"),
+        "sensor_status": health.get("sensor_status"),
+        "display_status": health.get("display_status"),
+        "mode": health.get("mode"),
+        "success_count": device.mqtt_success_count,
+        "failed_count": device.mqtt_failed_count,
+        "duplicate_count": device.mqtt_duplicate_count,
+        "last_message_id": device.mqtt_last_message_id,
+        "last_error": device.mqtt_last_error,
         "port": telemetry.port if telemetry else None,
         "voltage_v": telemetry.voltage_v if telemetry else None,
         "current_a": telemetry.current_a if telemetry else None,
@@ -396,6 +426,9 @@ def _device_snapshot(device, now):
         "energy_total_wh": telemetry.energy_total_wh if telemetry else None,
         "energy_delta_wh": telemetry.energy_delta_wh if telemetry else None,
         "charging_status": telemetry.charging_status if telemetry else "UNKNOWN",
+        "heap_free_bytes": health.get("free_heap", telemetry.heap_free_bytes if telemetry else None),
+        "rssi_dbm": health.get("rssi", telemetry.rssi_dbm if telemetry else None),
+        "reported_firmware_version": telemetry.firmware_version if telemetry else "",
         "last_update": device.last_seen_at,
     }
 
@@ -428,11 +461,43 @@ def device_logs_dashboard(request):
     elif selected_filter != "ALL":
         selected_filter = "ALL"
     page = Paginator(queryset, 50).get_page(request.GET.get("page"))
+    now = timezone.now()
+    attempts = MqttAttempt.objects.filter(received_at__gte=now - timedelta(days=7))
+    if selected_device:
+        attempts = attempts.filter(device_id=selected_device)
+    kind = request.GET.get("type", "")
+    if kind in {"heartbeat", "telemetry", "logs", "status", "ota"}:
+        attempts = attempts.filter(message_type=kind)
+    outcome = request.GET.get("outcome", "")
+    if outcome in {"SUCCESS", "FAILED", "DUPLICATE"}:
+        attempts = attempts.filter(status=outcome)
+    date_values = {}
+    for key, comparison in (("since", "gte"), ("until", "lte")):
+        raw = request.GET.get(key, "")[:40]
+        date_values[key] = raw
+        try:
+            parsed = parse_datetime(raw)
+        except ValueError:
+            parsed = None
+        if parsed:
+            if timezone.is_naive(parsed):
+                parsed = timezone.make_aware(parsed)
+            attempts = attempts.filter(**{f"received_at__{comparison}": parsed})
+    attempt_page = Paginator(attempts[:10000], 50).get_page(request.GET.get("mqtt_page"))
+    query = request.GET.copy()
+    query.pop("mqtt_page", None)
     return render(
         request,
         "myapp/device_logs.html",
         {
             "page": page,
+            "attempt_page": attempt_page,
+            "mqtt_query": query.urlencode(),
+            "mqtt_type": kind,
+            "mqtt_types": ["heartbeat", "telemetry", "logs", "status", "ota"],
+            "mqtt_outcome": outcome,
+            "mqtt_outcomes": ["SUCCESS", "FAILED", "DUPLICATE"],
+            **date_values,
             "devices": ChargerDevice.objects.order_by("device_id"),
             "selected_device": selected_device,
             "selected_filter": selected_filter,
@@ -448,9 +513,8 @@ def device_status_api(request):
     payload = []
     for device in ChargerDevice.objects.all():
         item = _device_snapshot(device, now)
-        item["last_update"] = (
-            item["last_update"].isoformat() if item["last_update"] else None
-        )
+        for key in ("last_update", "last_heartbeat"):
+            item[key] = item[key].isoformat() if item[key] else None
         payload.append(item)
     return JsonResponse({"devices": payload, "server_time": now.isoformat()})
 

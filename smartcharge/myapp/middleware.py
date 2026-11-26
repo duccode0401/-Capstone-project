@@ -18,6 +18,9 @@ class FirmwareTunnelMiddleware:
             host = request.get_host().lower().split(":", 1)[0].rstrip(".")
         except DisallowedHost:
             return HttpResponseBadRequest()
+        if (host == settings.OTA_PUBLIC_HOST and request.method == "POST"
+                and request.path_info == "/api/sepay/webhook/" and settings.SEPAY_WEBHOOK_API_KEY):
+            return self.get_response(request)
         if host == settings.OTA_PUBLIC_HOST or request.META.get("HTTP_X_FORWARDED_PROTO"):
             if request.method != "GET" or not FIRMWARE_PATH.fullmatch(request.path_info):
                 return HttpResponseNotFound()

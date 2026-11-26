@@ -5,6 +5,22 @@
   <title>SmartCharge Device Logs</title><link rel="stylesheet" href="{% static 'css/monitoring.css' %}">
 </head><body><main class="shell">
   <div class="topbar"><div><h1>ESP32 Logs</h1><p class="muted">Log mới nhất từ MQTT, phân trang 50 dòng.</p></div><nav class="nav"><a href="{% url 'myapp:devices_dashboard' %}">Monitoring</a><a href="{% url 'admin:index' %}">Admin</a></nav></div>
+  <h2>Xử lý MQTT</h2>
+  <form class="filters" method="get">
+    <label>Device ID <input name="device" value="{{ selected_device }}" maxlength="31"></label>
+    <label>Loại <select name="type"><option value="">Tất cả</option>{% for kind in mqtt_types %}<option {% if mqtt_type == kind %}selected{% endif %}>{{ kind }}</option>{% endfor %}</select></label>
+    <label>Kết quả <select name="outcome"><option value="">Tất cả</option>{% for outcome in mqtt_outcomes %}<option {% if mqtt_outcome == outcome %}selected{% endif %}>{{ outcome }}</option>{% endfor %}</select></label>
+    <label>Từ <input type="datetime-local" name="since" value="{{ since }}"></label>
+    <label>Đến <input type="datetime-local" name="until" value="{{ until }}"></label>
+    <button type="submit">Lọc</button>
+  </form>
+  <p class="muted">Giữ log 7 ngày. BROKER_CONFIRMED cho biết broker đã gửi PUBACK.</p>
+  <div style="overflow-x:auto">
+    <table><thead><tr><th>Thời gian</th><th>Device ID</th><th>Message ID</th><th>Loại</th><th>Topic</th><th>JSON</th><th>Kết quả</th><th>ACK</th><th>Mã lỗi</th><th>Trùng</th><th>Thời gian xử lý</th></tr></thead>
+    <tbody>{% for a in attempt_page %}<tr><td>{{ a.received_at }}</td><td>{{ a.device_id }}</td><td>{{ a.message_id }}</td><td>{{ a.message_type }}</td><td>{{ a.topic }}</td><td><code>{{ a.display_payload }}</code></td><td>{{ a.status }}</td><td>{{ a.ack_status }}</td><td>{{ a.error_code }}</td><td>{% if a.status == "DUPLICATE" %}Có{% else %}Không{% endif %}</td><td>{{ a.duration_ms }} ms</td></tr>{% empty %}<tr><td colspan="11">Không có bản tin phù hợp.</td></tr>{% endfor %}</tbody></table>
+  </div>
+  <div class="pagination">{% if attempt_page.has_previous %}<a href="?{{ mqtt_query }}&amp;mqtt_page={{ attempt_page.previous_page_number }}">Trước</a>{% endif %}<span>Trang {{ attempt_page.number }}/{{ attempt_page.paginator.num_pages }}</span>{% if attempt_page.has_next %}<a href="?{{ mqtt_query }}&amp;mqtt_page={{ attempt_page.next_page_number }}">Sau</a>{% endif %}</div>
+  <h2>Sự kiện thiết bị</h2>
   <form class="filters" method="get">
     <select name="device"><option value="">Tất cả thiết bị</option>{% for d in devices %}<option value="{{ d.device_id }}" {% if selected_device == d.device_id %}selected{% endif %}>{{ d.device_id }}</option>{% endfor %}</select>
     {% for f in filters %}<a class="{% if selected_filter == f %}active{% endif %}" href="?device={{ selected_device|urlencode }}&filter={{ f }}">{{ f }}</a>{% endfor %}
@@ -12,4 +28,4 @@
   <table><thead><tr><th>Time</th><th>Device</th><th>Level</th><th>Event</th><th>Message</th><th>Uptime</th></tr></thead>
   <tbody>{% for log in page %}<tr><td>{{ log.received_at }}</td><td>{{ log.device.device_id }}</td><td class="level-{{ log.level }}">{{ log.level }}</td><td>{{ log.event }}</td><td>{{ log.message }}</td><td>{{ log.uptime_ms|default_if_none:"—" }}</td></tr>{% empty %}<tr><td colspan="6">Không có log.</td></tr>{% endfor %}</tbody></table>
   <div class="pagination">{% if page.has_previous %}<a href="?device={{ selected_device|urlencode }}&filter={{ selected_filter }}&page={{ page.previous_page_number }}">← Trước</a>{% endif %}<span>Trang {{ page.number }}/{{ page.paginator.num_pages }}</span>{% if page.has_next %}<a href="?device={{ selected_device|urlencode }}&filter={{ selected_filter }}&page={{ page.next_page_number }}">Sau →</a>{% endif %}</div>
-</main>{% if page.number == 1 %}<script>setTimeout(() => location.reload(), 5000);</script>{% endif %}</body></html>
+</main></body></html>

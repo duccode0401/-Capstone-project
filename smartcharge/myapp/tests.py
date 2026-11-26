@@ -31,7 +31,7 @@ from mqtt_subscriber import (
 )
 
 from .iot_services import process_device_log, process_telemetry
-from .mqtt_config import mqtt_connection, public_test_topics
+from .mqtt_config import mqtt_connection, public_test_heartbeat_topic, public_test_topics
 from .models import (
     ChargerDevice,
     ChargerPort,
@@ -53,6 +53,7 @@ MQTT_TEST_SETTINGS = {
 
 
 @override_settings(**MQTT_TEST_SETTINGS)
+@override_settings(MQTT_PUBLIC_TEST_MODE=False, SEPAY_WEBHOOK_API_KEY="")
 class PaymentIdempotencyTests(TestCase):
     def setUp(self):
         self.device = ChargerDevice.objects.create(device_id="ESP32_001")
@@ -64,7 +65,7 @@ class PaymentIdempotencyTests(TestCase):
         response.json.return_value = {"transactions": [{"id": transaction_id}]}
         return response
 
-    @patch("myapp.views.mqtt_publish.single")
+    @patch("myapp.views.publish_once")
     @patch("myapp.views.requests.get")
     def test_successful_payment_creates_one_session(self, request_get, mqtt_single):
         request_get.return_value = self.sepay_response()
@@ -78,7 +79,7 @@ class PaymentIdempotencyTests(TestCase):
         self.assertEqual(session.status, "assigned")
         mqtt_single.assert_called_once()
 
-    @patch("myapp.views.mqtt_publish.single")
+    @patch("myapp.views.publish_once")
     @patch("myapp.views.requests.get")
     def test_repeated_poll_returns_same_session_without_duplicate_start(
         self, request_get, mqtt_single
@@ -113,7 +114,7 @@ class PaymentIdempotencyTests(TestCase):
                 sepay_transaction_id="tx-unique",
             )
 
-    @patch("myapp.views.mqtt_publish.single")
+    @patch("myapp.views.publish_once")
     @patch("myapp.views.requests.get")
     def test_each_transaction_in_one_sepay_response_is_processed_once(
         self, request_get, mqtt_single
@@ -138,7 +139,7 @@ class PaymentIdempotencyTests(TestCase):
         )
         mqtt_single.assert_called_once()
 
-    @patch("myapp.views.mqtt_publish.single")
+    @patch("myapp.views.publish_once")
     @patch("myapp.views.requests.get")
     def test_no_port_leaves_session_waiting_and_does_not_publish(
         self, request_get, mqtt_single
@@ -251,7 +252,7 @@ class ConcurrentPaymentTests(TransactionTestCase):
 
 class MigrationPreservesSessionsTests(TransactionTestCase):
     migrate_from = ("myapp", "0004_alter_chargingsession_status")
-    migrate_to = ("myapp", "0007_otajob_one_active_ota_job_per_device")
+    migrate_to = ("myapp", "0010_charging_start_delivery")
 
     def test_existing_session_survives_migration(self):
         executor = MigrationExecutor(connection)
@@ -359,6 +360,7 @@ OTA_TEST_SETTINGS = {
 
 
 @override_settings(MEDIA_ROOT=tempfile.gettempdir(), **OTA_TEST_SETTINGS)
+@override_settings(MQTT_PUBLIC_TEST_MODE=False)
 class OTAWorkflowTests(TestCase):
     def setUp(self):
         self.probe = self.enterContext(patch('myapp.ota_services._probe_https_release'))
@@ -570,6 +572,7 @@ class FirmwareTunnelTests(TestCase):
         self.assertEqual(self.client.get("/firmware/manifest/ota-test/" + "x" * 43 + "/", HTTP_HOST="ota.example.com").status_code, 403)
 
 
+@override_settings(MQTT_PUBLIC_TEST_MODE=False)
 class IoTMessageTests(TestCase):
     def telemetry_payload(self):
         return {
@@ -632,7 +635,7 @@ class PublicMqttTests(TestCase):
         mqtt_client = Mock()
         mqtt_client.subscribe.return_value = (0, 1)
         on_connect(mqtt_client, None, None, 0, None)
-        mqtt_client.subscribe.assert_called_once_with([(telemetry, 0), (logs, 0)])
+        mqtt_client.subscribe.assert_called_once_with([(telemetry, 1), (logs, 1), (public_test_heartbeat_topic(), 1)])
 
         def receive(topic, retained=False, **data):
             on_message(None, None, SimpleNamespace(
@@ -672,7 +675,7 @@ class PublicMqttTests(TestCase):
             mqtt_connection()
         with self.assertRaisesMessage(ValidationError, "OTA is disabled"):
             create_and_issue_ota(None, None, Mock())
-        with patch("myapp.views.mqtt_publish.single") as publish:
+        with patch("myapp.views.publish_once") as publish:
             self.assertFalse(publish_start_once(None))
             publish.assert_not_called()
         with patch("myapp.views.requests.get") as payment_api:

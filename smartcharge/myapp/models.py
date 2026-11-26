@@ -1,4 +1,5 @@
 import hashlib
+import json
 import uuid
 
 from django.conf import settings
@@ -20,6 +21,13 @@ class ChargerDevice(models.Model):
     name = models.CharField(max_length=100, blank=True)
     last_seen_at = models.DateTimeField(null=True, blank=True)
     firmware_version = models.CharField(max_length=31, blank=True)
+    last_heartbeat_at = models.DateTimeField(null=True, blank=True)
+    mqtt_health = models.JSONField(default=dict, blank=True)
+    mqtt_success_count = models.PositiveBigIntegerField(default=0)
+    mqtt_failed_count = models.PositiveBigIntegerField(default=0)
+    mqtt_duplicate_count = models.PositiveBigIntegerField(default=0)
+    mqtt_last_message_id = models.CharField(max_length=64, blank=True)
+    mqtt_last_error = models.CharField(max_length=32, blank=True)
     ota_sequence = models.PositiveBigIntegerField(default=0)
 
     def __str__(self):
@@ -51,6 +59,7 @@ class ChargingSession(models.Model):
         max_length=100, null=True, blank=True, unique=True
     )
     mqtt_start_sent_at = models.DateTimeField(null=True, blank=True)
+    mqtt_start_delivery_unknown = models.BooleanField(default=False)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -76,6 +85,16 @@ class ChargerPort(models.Model):
 
     def __str__(self):
         return f"{self.device.device_id} - Port {self.port_no}"
+
+
+class PaymentOrder(models.Model):
+    code = models.CharField(max_length=20, unique=True)
+    port = models.ForeignKey(ChargerPort, on_delete=models.PROTECT)
+    amount_vnd = models.PositiveIntegerField()
+    expires_at = models.DateTimeField()
+    session = models.OneToOneField(
+        ChargingSession, null=True, blank=True, on_delete=models.PROTECT,
+    )
 
 
 class FirmwareArtifact(models.Model):
@@ -231,6 +250,9 @@ class DeviceTelemetry(models.Model):
     energy_delta_wh = models.FloatField()
     charging = models.BooleanField()
     charging_status = models.CharField(max_length=24)
+    heap_free_bytes = models.PositiveIntegerField(null=True, blank=True)
+    rssi_dbm = models.SmallIntegerField(null=True, blank=True)
+    firmware_version = models.CharField(max_length=31, blank=True)
     timestamp = models.DateTimeField(default=timezone.now)
     received_at = models.DateTimeField(auto_now_add=True)
 
@@ -270,3 +292,34 @@ class DeviceLog(models.Model):
 
     def __str__(self):
         return f"{self.device} {self.level} {self.event}"
+
+class MqttReceipt(models.Model):
+    device = models.ForeignKey(ChargerDevice, on_delete=models.CASCADE)
+    message_id = models.CharField(max_length=64)
+    digest = models.CharField(max_length=64)
+    last_seen_at = models.DateTimeField(db_index=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["device", "message_id"], name="unique_device_mqtt_message"),
+        ]
+
+
+class MqttAttempt(models.Model):
+    received_at = models.DateTimeField(db_index=True)
+    device_id = models.CharField(max_length=31, blank=True, db_index=True)
+    message_id = models.CharField(max_length=64, blank=True)
+    message_type = models.CharField(max_length=16, db_index=True)
+    topic = models.CharField(max_length=128)
+    payload = models.JSONField(default=dict)
+    status = models.CharField(max_length=9, db_index=True)
+    ack_status = models.CharField(max_length=20, default="NOT_SENT")
+    error_code = models.CharField(max_length=32, blank=True)
+    duration_ms = models.PositiveIntegerField()
+
+    class Meta:
+        ordering = ["-received_at", "-pk"]
+
+    @property
+    def display_payload(self):
+        return json.dumps(self.payload, ensure_ascii=False, sort_keys=True)

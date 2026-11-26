@@ -8,14 +8,14 @@ from django.db import transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from .models import ChargerDevice, DeviceLog, DeviceTelemetry
-from .ota_services import DEVICE_ID_PATTERN
+from .models import ChargerDevice, ChargingSession, DeviceLog, DeviceTelemetry
+from .ota_services import DEVICE_ID_PATTERN, version_parts
 
 
 ALLOWED_TELEMETRY_STATUSES = {"IDLE", "CHARGING", "DONE"}
 EVENT_PATTERN = re.compile(r"^[A-Z0-9_]{1,64}$")
 SECRET_PATTERN = re.compile(
-    r"(password|passwd|secret|token|authorization|bearer|api[_-]?key)", re.I
+    r"(password|passwd|secret|token|authorization|bearer|api[_-]?key|hmac|sepay|account[_ -]?number|bank[_ -]?account|payment[_ -]?code)", re.I
 )
 
 
@@ -26,6 +26,13 @@ def _number(data, key, minimum, maximum):
     value = float(value)
     if not math.isfinite(value) or not minimum <= value <= maximum:
         raise ValidationError(f"{key} vượt phạm vi hợp lệ.")
+    return value
+
+
+def _optional_integer(data, key, minimum, maximum):
+    value = data.get(key)
+    if value is not None and (type(value) is not int or not minimum <= value <= maximum):
+        raise ValidationError(f"Invalid {key}.")
     return value
 
 
@@ -75,6 +82,11 @@ def process_telemetry(data):
             raise ValidationError("Telemetry timestamp phải là ISO-8601 UTC.")
         sample_time = sample_time.astimezone(datetime_timezone.utc)
 
+    firmware_version = data.get("firmware_version", "")
+    if (not isinstance(firmware_version, str) or len(firmware_version) > 31
+            or (firmware_version and not version_parts(firmware_version))):
+        raise ValidationError("Invalid reported firmware version.")
+
     with transaction.atomic():
         telemetry = DeviceTelemetry.objects.create(
             device=device,
@@ -87,8 +99,15 @@ def process_telemetry(data):
             charging=charging,
             charging_status=status,
             timestamp=sample_time,
+            heap_free_bytes=_optional_integer(data, "heap_free_bytes", 0, 16 * 1024 * 1024),
+            rssi_dbm=_optional_integer(data, "rssi_dbm", -127, 0),
+            firmware_version=firmware_version,
         )
         ChargerDevice.objects.filter(pk=device.pk).update(last_seen_at=telemetry.received_at)
+        if charging and not settings.MQTT_PUBLIC_TEST_MODE:
+            ChargingSession.objects.filter(
+                device=device, port_no=port, status="assigned", mqtt_start_sent_at__isnull=False,
+            ).update(status="charging", updated_at=telemetry.received_at)
     _prune(
         DeviceTelemetry,
         device,
