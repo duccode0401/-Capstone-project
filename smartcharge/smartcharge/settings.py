@@ -33,6 +33,8 @@ DEBUG = os.environ.get("DJANGO_DEBUG", "").strip().lower() == "true"
 FIRMWARE_HTTPS_BASE_URL = os.environ.get("FIRMWARE_HTTPS_BASE_URL", "").rstrip("/")
 OTA_PUBLIC_HOST = urlsplit(FIRMWARE_HTTPS_BASE_URL).hostname
 ALLOWED_HOSTS = ["localhost", "127.0.0.1", "[::1]"]
+if os.environ.get("DJANGO_MDNS_LAN", "").lower() == "true":
+    ALLOWED_HOSTS.append("smartcharge.local")
 DJANGO_LAN_MODE = os.environ.get("DJANGO_LAN_MODE", "").strip().lower() == "true"
 CSRF_TRUSTED_ORIGINS = []
 if OTA_PUBLIC_HOST:
