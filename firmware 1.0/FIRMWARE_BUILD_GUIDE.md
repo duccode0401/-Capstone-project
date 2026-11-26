@@ -31,6 +31,18 @@ python tools\provision.py --config provisioning\device.json --out provisioning\d
 
 `device-secret.json`, `nvs.csv` và `nvs.bin` chứa bí mật. Backend cần cùng `key_hex` để ký `START_CHARGE`; không đưa key lên GitHub hay MQTT.
 
+Tool in một dòng không nhạy cảm `MQTT_PUBLIC_TEST_DEVICE=SC_TEST_<16-hex>`. Sao chép đúng alias này vào `.env` của Web:
+
+```dotenv
+MQTT_PUBLIC_TEST_MODE=true
+MQTT_PUBLIC_TEST_DEVICE=SC_TEST_0123456789abcdef
+MQTT_PUBLIC_TEST_LOGICAL_DEVICE=ESP32_001
+MQTT_BROKER=broker.emqx.io
+MQTT_PORT=8883
+```
+
+Nếu giữ NVS cũ khi migration, firmware tạo alias một lần ở lần boot đầu, lưu vào key NVS `mqtt_alias` và dùng lại qua mọi lần reboot. Xem alias không bí mật bằng UART dòng `Public route alias=...` hoặc lệnh `STATUS`.
+
 ## Migration từ layout Recovery + OTA
 
 NVS vẫn ở `0x9000` kích thước `0x4000`; `phy_init` vẫn ở `0xF000`. App mới là factory duy nhất tại `0x10000`, kích thước `0x3F0000`. Không dùng lại lệnh nạp Main cũ tại `0x110000`.
@@ -57,3 +69,14 @@ idf.py -B build-smartcharge -p COM3 monitor
 ```
 
 UART 115200. MQTT tự reconnect; telemetry/heartbeat mỗi 10 giây. QoS 1 có PUBACK và Application ACK. ACK trên broker công cộng chỉ để chẩn đoán, không cấp quyền bật relay. Lệnh sạc phải đúng device, HMAC-SHA256, thời hạn và sequence chống replay.
+
+Public topic contract:
+
+```text
+iot/charge_station/test/<alias>/telemetry
+iot/charge_station/test/<alias>/logs
+iot/charge_station/test/<alias>/heartbeat
+iot/charge_station/test/<alias>/ack
+```
+
+Payload dùng `device=<alias>` để định tuyến và `logical_device=ESP32_001` cho danh tính nghiệp vụ. Web chỉ xử lý telemetry IDLE, log allowlist và heartbeat trong Public Test Mode; ACK không bao giờ xác nhận thanh toán hoặc cấp quyền relay.

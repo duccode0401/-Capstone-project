@@ -33,12 +33,22 @@ class ToolTests(unittest.TestCase):
             self.assertEqual((output / "nvs.bin").stat().st_size, 0x4000)
             secret = json.loads((output / "device-secret.json").read_text())
             self.assertEqual(secret["broker"], "mqtts://broker.emqx.io:8883")
+            self.assertRegex(secret["mqtt_alias"], r"^SC_TEST_[a-f0-9]{16}$")
             self.assertEqual(len(bytes.fromhex(secret["key_hex"])), 32)
             self.assertGreaterEqual(len(secret["setup_password"]), 8)
             terminal = result.stdout + result.stderr
             self.assertNotIn(secret["key_hex"], terminal)
             self.assertNotIn(secret["setup_password"], terminal)
             self.assertNotIn(secret["password"], terminal)
+            self.assertIn(f"MQTT_PUBLIC_TEST_DEVICE={secret['mqtt_alias']}", terminal)
+
+    def test_public_topics_and_alias_are_persisted(self):
+        network = (ROOT / "components/sc_core/sc_network.c").read_text()
+        storage = (ROOT / "components/sc_core/sc_storage.c").read_text()
+        self.assertIn('SC_PUBLIC_PREFIX "%s/"', network)
+        self.assertIn('snprintf(ack_topic,sizeof(ack_topic),"%sack",mqtt_base)', network)
+        self.assertIn('nvs_set_str(store,"mqtt_alias",sc_config.mqtt_alias)', storage)
+        self.assertNotIn('SC_BASE "ack/', network)
 
     def test_ota_and_recovery_sources_removed(self):
         self.assertFalse((ROOT / "recovery/CMakeLists.txt").exists())

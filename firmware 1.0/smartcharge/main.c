@@ -115,7 +115,7 @@ static void publish_done(void)
 {
     if(!done_pending) return;
     char json[160];
-    snprintf(json,sizeof(json),"{\"device\":\"%s\",\"port\":1,\"status\":\"DONE\"}",sc_config.device);
+    strcpy(json,"{\"port\":1,\"status\":\"DONE\"}");
     if(sc_publish(SC_BASE "status",json,true)) done_pending=false;
 }
 static void telemetry_task(void *arg)
@@ -131,10 +131,10 @@ static void telemetry_task(void *arg)
         double interval=(now-previous_us)/1000000.0;
         char json[640];
         snprintf(json,sizeof(json),
-        "{\"device\":\"%s\",\"port\":1,\"voltage_v\":%.3f,\"current_a\":%.4f,"
+        "{\"port\":1,\"voltage_v\":%.3f,\"current_a\":%.4f,"
         "\"power_w\":%.3f,\"energy_total_wh\":%.6f,\"energy_delta_wh\":%.6f,"
         "\"charging\":%s,\"status\":\"%s\",\"interval_s\":%.3f}",
-        sc_config.device,(double)s.meter.Vrms,(double)s.meter.Irms,(double)s.meter.P,
+        (double)s.meter.Vrms,(double)s.meter.Irms,(double)s.meter.P,
         s.total,s.accumulated-previous_wh,s.charging?"true":"false",
         s.charging?"CHARGING":"IDLE",interval);
         if(s.valid) sc_publish(SC_BASE "telemetry",json,false);

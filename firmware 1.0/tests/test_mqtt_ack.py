@@ -187,7 +187,7 @@ typedef struct {
 } *esp_mqtt_event_handle_t;
 '''
         wrapper += types + r'''
-static struct { char device[32]; } sc_config={"ESP32_001"};
+static struct { char device[32], mqtt_alias[25]; } sc_config={"ESP32_001","SC_TEST_0123456789abcdef"};
 static uint32_t nonce[]={0xa83f921b,0x01234567};
 static unsigned tx_sequence, transport_wait, dropped;
 static int tx_queue=1,ack_queue=2;
@@ -195,11 +195,13 @@ static bool allow_queue=true;
 static outbound_t sent;
 static ack_event_t ack;
 static char ack_topic[80];
+static char mqtt_base[64]="iot/charge_station/test/SC_TEST_0123456789abcdef/";
 static bool got_ack;
 static int64_t esp_timer_get_time(void) { return 10000000; }
 static bool sc_network_ready(void) { return true; }
 static bool sc_serial_debug(void) { return false; }
 static const char *sc_logical_device(void) { return sc_config.device; }
+static const char *sc_routing_device(void) { return sc_config.mqtt_alias; }
 static BaseType_t xQueueSend(int q,const void *item,int ticks) {
     if(!allow_queue) return false;
     if(q==tx_queue) memcpy(&sent,item,sizeof(sent));
@@ -221,21 +223,22 @@ static void server(const char *device, bool retained, bool valid) {
     assert(got_ack==valid);
 }
 int main(void) {
-    const char *data="{\"device\":\"ESP32_001\",\"voltage_v\":1.5}";
+    const char *data="{\"voltage_v\":1.5}";
     assert(sc_publish(SC_BASE "telemetry",data,false));
-    assert(!strcmp(sent.topic,SC_BASE "telemetry"));
+    assert(!strcmp(sent.topic,"iot/charge_station/test/SC_TEST_0123456789abcdef/telemetry"));
     cJSON *json=sc_parse_flat_json(sent.json,sizeof(sent.json)-1);
     assert(json);
     assert(cJSON_GetObjectItemCaseSensitive(json,"protocol_version")->valueint==2);
     assert(strlen(sent.id)==17 && sent.id[8]=='-');
+    assert(!strcmp(cJSON_GetObjectItemCaseSensitive(json,"device")->valuestring,"SC_TEST_0123456789abcdef"));
     assert(!strcmp(cJSON_GetObjectItemCaseSensitive(json,"logical_device")->valuestring,"ESP32_001"));
     assert(cJSON_GetObjectItemCaseSensitive(json,"uptime_ms")->valueint==10000);
     assert(cJSON_GetObjectItemCaseSensitive(json,"voltage_v")->valuedouble==1.5);
     cJSON_Delete(json);
-    server(sc_config.device,false,true);
+    server(sc_config.mqtt_alias,false,true);
     assert(ack.success && !ack.retryable);
     server("wrong-device",false,false);
-    server(sc_config.device,true,false);
+    server(sc_config.mqtt_alias,true,false);
     char first[SC_ACK_ID_LEN]; strcpy(first,sent.id);
     nonce[0]++; tx_sequence=0;
     assert(sc_publish(SC_BASE "telemetry",data,false));

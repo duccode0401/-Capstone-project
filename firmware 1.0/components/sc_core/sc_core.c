@@ -23,6 +23,7 @@ sc_config_t sc_config;
 static nvs_handle_t store;
 
 const char *sc_logical_device(void) { return sc_config.device; }
+const char *sc_routing_device(void) { return sc_config.mqtt_alias; }
 
 cJSON *sc_parse_flat_json(const char *text,size_t max_length)
 {

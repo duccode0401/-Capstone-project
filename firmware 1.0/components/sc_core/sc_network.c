@@ -60,6 +60,7 @@ static unsigned stats_tx,stats_ok,stats_fail,stats_retry;
 static atomic_uint tx_sequence, transport_wait;
 static atomic_uint health;
 static char ack_topic[80];
+static char mqtt_base[64];
 static bool headless;
 static bool server_v2_seen;
 static esp_mqtt_client_handle_t client;
@@ -105,16 +106,17 @@ bool sc_publish(const char *topic,const char *json,bool reliable)
     else return false;
     m.state_changing=reliable;
 
-    strcpy(m.topic,topic);
+    snprintf(m.topic,sizeof(m.topic),"%s%s",mqtt_base,m.kind);
     unsigned last=atomic_load(&tx_sequence);
     do {
         if(last==UINT32_MAX) return false;
     } while(!atomic_compare_exchange_weak(&tx_sequence,&last,last+1));
     uint32_t seq=last+1;
     snprintf(m.id,sizeof(m.id),"%08"PRIx32"-%08"PRIx32,nonce[0],seq);
-    int n=snprintf(m.json,sizeof(m.json),"{\"protocol_version\":2,\"message_id\":\"%s\","
-        "\"message_type\":\"%s\",\"uptime_ms\":%"PRId64",\"logical_device\":\"%s\",%s",
-        m.id,m.kind,m.queued_at/1000,sc_logical_device(),json+1);
+    int n=snprintf(m.json,sizeof(m.json),"{\"protocol_version\":2,\"device\":\"%s\","
+        "\"message_id\":\"%s\",\"message_type\":\"%s\",\"uptime_ms\":%"PRId64","
+        "\"logical_device\":\"%s\",%s",
+        sc_routing_device(),m.id,m.kind,m.queued_at/1000,sc_logical_device(),json+1);
     if(n<0 || n>=sizeof(m.json)) {
         ESP_LOGW("TX","FAILED_PAYLOAD_TOO_LARGE id=%s type=%s",m.id,m.kind);
         return false;
@@ -128,7 +130,7 @@ bool sc_publish(const char *topic,const char *json,bool reliable)
         return false;
     }
     if(sc_serial_debug()) ESP_LOGI("TX","QUEUED id=%s device=%s type=%s topic=%s%s",
-             m.id,sc_config.device,m.kind,m.topic,sc_network_ready()?"":" offline");
+             m.id,sc_routing_device(),m.kind,m.topic,sc_network_ready()?"":" offline");
     return true;
 }
 void sc_log(const char *level,const char *event,const char *message)
@@ -137,7 +139,6 @@ void sc_log(const char *level,const char *event,const char *message)
     cJSON *j=cJSON_CreateObject(); if(!j) return;
     wifi_ap_record_t ap;
     int rssi=esp_wifi_sta_get_ap_info(&ap)==ESP_OK?ap.rssi:0;
-    cJSON_AddStringToObject(j,"device",sc_config.device);
     cJSON_AddStringToObject(j,"level",!strcmp(level,"WARN")?"WARNING":level);
     cJSON_AddStringToObject(j,"event",event);
     char bounded[161];
@@ -181,7 +182,7 @@ static void receive_ack(esp_mqtt_event_handle_t e)
     const cJSON *timestamp=cJSON_GetObjectItemCaseSensitive(j,"server_timestamp");
     bool success=cJSON_IsString(status) && !strcmp(status->valuestring,"SUCCESS");
     bool failed=cJSON_IsString(status) && !strcmp(status->valuestring,"FAILED");
-    if(cJSON_IsString(device) && !strcmp(device->valuestring,sc_config.device) &&
+    if(cJSON_IsString(device) && !strcmp(device->valuestring,sc_routing_device()) &&
        cJSON_IsString(id) && strlen(id->valuestring)==SC_ACK_ID_LEN-1 &&
        id->valuestring[8]=='-' && strspn(id->valuestring,"0123456789abcdef")==8 &&
        strspn(id->valuestring+9,"0123456789abcdef")==8 &&
@@ -468,11 +469,11 @@ static void heartbeat(void)
     const char *mode=headless?"HEADLESS":"NORMAL";
     bool disabled=headless;
     char json[512];
-    snprintf(json,sizeof(json),"{\"device\":\"%s\",\"firmware_version\":\"%.31s\","
+    snprintf(json,sizeof(json),"{\"firmware_version\":\"%.31s\","
         "\"free_heap\":%u,\"min_free_heap\":%u,\"rssi\":%d,\"mqtt_connected\":true,"
         "\"relay_on\":%s,\"sensor_status\":\"%s\",\"display_status\":\"%s\","
         "\"dropped_messages\":%"PRIu32",\"reset_reason\":%d,\"mode\":\"%s\"}",
-        sc_config.device,esp_app_get_description()->version,
+        esp_app_get_description()->version,
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT),
         (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT),rssi,
         gpio_get_level(GPIO_NUM_25)?"true":"false",
@@ -511,8 +512,8 @@ static void serial_commands(void)
         else if(strcmp(command,"LOG NORMAL")) {
             if(!strcmp(command,"HELP")) ESP_LOGW("USB","LOG NORMAL | LOG DEBUG | LOG ERROR | STATUS | HELP");
             else if(!strcmp(command,"STATUS")) {
-                ESP_LOGW("USB","device=%s mode=%u mqtt=%d queue=%u dropped=%"PRIu32,
-                         sc_logical_device(),atomic_load(&serial_mode),sc_network_ready(),
+                ESP_LOGW("USB","device=%s alias=%s mode=%u mqtt=%d queue=%u dropped=%"PRIu32,
+                         sc_logical_device(),sc_routing_device(),atomic_load(&serial_mode),sc_network_ready(),
                          (unsigned)uxQueueMessagesWaiting(tx_queue),sc_dropped_messages());
             } else ESP_LOGW("USB","Unknown command. Use HELP.");
             continue;
@@ -571,7 +572,8 @@ void sc_network_start_headless(void)
 void sc_network_start(void (*cb)(bool),void (*show_setup)(const char *,const char *))
 {
     wifi_cb=cb;
-    snprintf(ack_topic,sizeof(ack_topic),SC_BASE "ack/%s",sc_config.device);
+    snprintf(mqtt_base,sizeof(mqtt_base),SC_PUBLIC_PREFIX "%s/",sc_routing_device());
+    snprintf(ack_topic,sizeof(ack_topic),"%sack",mqtt_base);
     tx_queue=xQueueCreate(5,sizeof(outbound_t)); rx_queue=xQueueCreate(3,sizeof(sc_command_t));
     ack_queue=xQueueCreate(12,sizeof(ack_event_t));
     network=xEventGroupCreate();
@@ -610,6 +612,7 @@ void sc_network_start(void (*cb)(bool),void (*show_setup)(const char *,const cha
     if(!serial_rx_ready) ESP_LOGW("USB","Serial command input unavailable");
     ESP_LOGI("BOOT","%s | FW %.31s | %s | reset=%d",sc_logical_device(),
              esp_app_get_description()->version,headless?"HEADLESS":"NORMAL",esp_reset_reason());
+    ESP_LOGI("MQTT","Public route alias=%s base=%s",sc_routing_device(),mqtt_base);
     client=esp_mqtt_client_init(&mqtt);
     ESP_ERROR_CHECK(client?ESP_OK:ESP_ERR_NO_MEM);
     ESP_ERROR_CHECK(esp_mqtt_client_register_event(client,ESP_EVENT_ANY_ID,mqtt_event,NULL));

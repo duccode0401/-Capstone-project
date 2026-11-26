@@ -7,16 +7,18 @@
 #include "freertos/task.h"
 
 #define SC_BASE "iot/charge_station/v1/"
+#define SC_PUBLIC_PREFIX "iot/charge_station/test/"
 #define SC_MQTT_BROKER "mqtts://broker.emqx.io:8883"
 #define SC_MESSAGE_MAX 1536
 typedef struct {
-    char device[32], ssid[33], password[65];
+    char device[32], mqtt_alias[25], ssid[33], password[65];
     char key_hex[65];
     bool command_auth_ready;
 } sc_config_t;
 typedef struct { uint32_t network_epoch; char data[SC_MESSAGE_MAX]; } sc_command_t;
 extern sc_config_t sc_config;
 const char *sc_logical_device(void);
+const char *sc_routing_device(void);
 bool sc_serial_debug(void);
 cJSON *sc_parse_flat_json(const char *text, size_t max_length);
 esp_err_t sc_init(void);

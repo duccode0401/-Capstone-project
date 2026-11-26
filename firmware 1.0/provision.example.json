@@ -1,5 +1,6 @@
 {
   "device": "ESP32_001",
+  "mqtt_alias": "",
   "ssid": "",
   "password": "",
   "setup_password": "",

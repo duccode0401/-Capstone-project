@@ -1,6 +1,7 @@
 #include "sc_storage.h"
 
 #include <ctype.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -21,6 +22,12 @@ static bool valid_device(const char *value)
     for(size_t i=0;i<length;i++)
         if(!isalnum((unsigned char)value[i]) && value[i]!='_' && value[i]!='-' && value[i]!='.') return false;
     return true;
+}
+
+static bool valid_alias(const char *value)
+{
+    return value && strlen(value)==24 && !strncmp(value,"SC_TEST_",8) &&
+        strspn(value+8,"0123456789abcdef")==16;
 }
 
 static bool json_string(cJSON *json,const char *key,char *output,size_t capacity)
@@ -46,6 +53,12 @@ static void create_setup_password(void)
     setup_password[12]=0;
 }
 
+static void create_mqtt_alias(void)
+{
+    snprintf(sc_config.mqtt_alias,sizeof(sc_config.mqtt_alias),"SC_TEST_%08"PRIx32"%08"PRIx32,
+             esp_random(),esp_random());
+}
+
 esp_err_t storage_init(void)
 {
     esp_err_t error=nvs_flash_init();
@@ -65,6 +78,7 @@ esp_err_t storage_init(void)
         if(json) {
             if(json_string(json,"device",candidate,sizeof(candidate)) && valid_device(candidate))
                 strcpy(sc_config.device,candidate);
+            json_string(json,"mqtt_alias",sc_config.mqtt_alias,sizeof(sc_config.mqtt_alias));
             json_string(json,"ssid",sc_config.ssid,sizeof(sc_config.ssid));
             json_string(json,"password",sc_config.password,sizeof(sc_config.password));
             json_string(json,"key_hex",sc_config.key_hex,sizeof(sc_config.key_hex));
@@ -78,6 +92,16 @@ esp_err_t storage_init(void)
             strcpy(sc_config.password,saved_password);
         else sc_config.password[0]=0;
     }
+    char saved_alias[sizeof(sc_config.mqtt_alias)]={0};
+    if(load_string("mqtt_alias",saved_alias,sizeof(saved_alias))==ESP_OK && valid_alias(saved_alias))
+        strcpy(sc_config.mqtt_alias,saved_alias);
+    if(!valid_alias(sc_config.mqtt_alias)) create_mqtt_alias();
+    if(strcmp(saved_alias,sc_config.mqtt_alias)) {
+        error=nvs_set_str(store,"mqtt_alias",sc_config.mqtt_alias);
+        if(error==ESP_OK) error=nvs_commit(store);
+        if(error!=ESP_OK) return error;
+        ESP_LOGI("STORAGE","Generated and persisted a public MQTT routing alias");
+    }
     sc_config.command_auth_ready=strlen(sc_config.key_hex)==64 &&
         strspn(sc_config.key_hex,"0123456789abcdefABCDEF")==64;
 
@@ -88,8 +112,9 @@ esp_err_t storage_init(void)
         if(error!=ESP_OK) return error;
         ESP_LOGI("STORAGE","Generated a dedicated Setup Mode password");
     }
-    ESP_LOGI("STORAGE","NVS loaded; Wi-Fi=%s command_auth=%s",
-             sc_config.ssid[0]?"configured":"missing",sc_config.command_auth_ready?"ready":"disabled");
+    ESP_LOGI("STORAGE","NVS loaded; Wi-Fi=%s command_auth=%s alias=%s",
+             sc_config.ssid[0]?"configured":"missing",sc_config.command_auth_ready?"ready":"disabled",
+             sc_config.mqtt_alias);
     return ESP_OK;
 }
 
