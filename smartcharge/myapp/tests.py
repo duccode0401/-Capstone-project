@@ -5,7 +5,7 @@ from django.core.exceptions import ValidationError
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.urls import NoReverseMatch, reverse
 
-from mqtt_subscriber import _dispatch_public_test
+from mqtt_subscriber import PUBLIC_TEST_EVENTS, _dispatch_public_test
 from .models import FirmwareArtifact, OTAJob, OTAProgressEvent
 from .mqtt_config import mqtt_connection, public_test_topics
 
@@ -39,6 +39,20 @@ class PublicArchitectureTests(TestCase):
                 "device": "SC_TEST_0123456789abcdef", "charging": True,
                 "status": "CHARGING",
             })
+
+    def test_current_firmware_events_are_allowlisted(self):
+        emitted = {
+            "BOOT", "CHARGE_COMPLETED", "CHARGING_STARTED", "CHARGING_STOPPED", "HEALTHY",
+            "HEAP_LOW", "MQTT_CONNECTED", "MQTT_DISCONNECTED", "MQTT_ERROR",
+            "PAYMENT_ACCEPTED", "PAYMENT_REJECTED", "REBOOT_REASON", "RELAY_OFF", "RELAY_ON",
+            "SENSOR_ERROR", "WATCHDOG_RESET", "WIFI_CONNECTED", "WIFI_DISCONNECTED",
+        }
+        self.assertLessEqual(emitted, PUBLIC_TEST_EVENTS.keys())
+
+    @override_settings(MQTT_BROKER="broker.hivemq.com", MQTT_PORT=8883)
+    def test_public_mode_requires_emqx_tls_endpoint(self):
+        with self.assertRaisesMessage(ValidationError, "broker.emqx.io:8883"):
+            mqtt_connection(subscribe_only=True)
 
     def test_ota_web_and_admin_are_removed_but_legacy_models_remain(self):
         with self.assertRaises(NoReverseMatch):

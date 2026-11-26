@@ -79,6 +79,8 @@ def sanitized_payload(data):
         result["firmware_version"] = data["firmware_version"]
     if _matches(EVENT_PATTERN, data.get("event")):
         result["event"] = data["event"]
+    if _matches(DEVICE_ID_PATTERN, data.get("logical_device")):
+        result["logical_device"] = data["logical_device"]
     if _firmware(data.get("version")):
         result["version"] = data["version"]
     if "message" in data:
@@ -210,6 +212,8 @@ def ingest(client, topic, kind, data, dispatch, *, invalid_json=False):
                 raise Rejected("INVALID_MESSAGE_ID")
             if not valid_type:
                 raise Rejected("INVALID_MESSAGE_TYPE")
+            if public and data.get("logical_device") != settings.MQTT_PUBLIC_TEST_LOGICAL_DEVICE:
+                raise Rejected("INVALID_LOGICAL_DEVICE")
             if _optional_integer(data, "uptime_ms", 0, 2**63 - 1) is None:
                 raise Rejected("INVALID_PAYLOAD")
             if kind == "status" and (type(data.get("port")) is not int or not 1 <= data["port"] <= 32):

@@ -13,6 +13,18 @@ iot/charge_station/test/<SC_TEST_alias>/heartbeat
 iot/charge_station/test/<SC_TEST_alias>/ack
 ```
 
+Firmware lưu alias ở NVS key `mqtt_alias`; alias không đổi sau reboot. Lấy alias từ output của `tools/provision.py`, dòng UART `Public route alias=...` hoặc lệnh USB `STATUS`, rồi cấu hình Web:
+
+```dotenv
+MQTT_PUBLIC_TEST_MODE=true
+MQTT_PUBLIC_TEST_DEVICE=SC_TEST_0123456789abcdef
+MQTT_PUBLIC_TEST_LOGICAL_DEVICE=ESP32_001
+MQTT_BROKER=broker.emqx.io
+MQTT_PORT=8883
+```
+
+Payload v2 dùng `device` bằng alias để định tuyến và `logical_device=ESP32_001` cho danh tính nghiệp vụ. ACK trả về đúng topic alias, giữ nguyên `message_id` và `message_type`. TLS luôn dùng CA store hệ điều hành và xác minh hostname `broker.emqx.io`.
+
 Public mode accepts only idle telemetry, allow-listed device logs and heartbeat data. It cannot create payment orders, mark charging complete, publish relay commands or start a charging session. Never use an anonymous public broker for real charging operations.
 
 For an operational deployment set `MQTT_PUBLIC_TEST_MODE=false`, use a private TLS broker and unique backend credentials. The backend deliberately rejects known public brokers in this mode. Current firmware-compatible operational topics remain `iot/charge_station/v1/telemetry`, `logs`, `heartbeat`, `status`, device ACK and orders topics.

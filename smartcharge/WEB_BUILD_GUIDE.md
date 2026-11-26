@@ -31,6 +31,17 @@ MQTT_PUBLIC_TEST_LOGICAL_DEVICE=ESP32_001
 
 Subscriber kết nối TLS ẩn danh đến `broker.emqx.io:8883`, nhận ba topic `telemetry`, `logs` và `heartbeat` dưới `iot/charge_station/test/<alias>/`. ACK phát trên `iot/charge_station/test/<alias>/ack`. Payload `device` phải trùng alias. Firmware legacy vẫn dùng được khi gửi telemetry và log lên topic của alias. Chế độ này dùng `db-public-test.sqlite3` và khóa đường gửi lệnh sạc, OTA và xử lý SePay. Broker công cộng chỉ dùng cho thử nghiệm.
 
+Alias được firmware lưu bền vững tại NVS key `mqtt_alias`. Nếu dùng NVS mới, lấy alias từ output provisioning; nếu giữ NVS OTA cũ, boot firmware mới một lần rồi đọc dòng UART `Public route alias=...`. Đặt chính xác alias đó vào `MQTT_PUBLIC_TEST_DEVICE`; giữ `MQTT_PUBLIC_TEST_LOGICAL_DEVICE=ESP32_001`.
+
+Live test tùy chọn dùng alias thử riêng, sau khi đã chạy migration:
+
+```powershell
+python manage.py migrate
+python scripts\test_public_mqtt_e2e.py
+```
+
+Script dùng TLS CA store, publish telemetry/log/heartbeat mô phỏng lên EMQX, chạy chính ingestion callback của Django và chỉ PASS khi nhận đủ ba Application ACK sau database commit. Không chạy script này trong unit test hoặc với alias của thiết bị đang nối tải.
+
 ### Secure
 
 Điền hostname broker TLS riêng và thông tin đăng nhập backend do quản trị broker cấp.

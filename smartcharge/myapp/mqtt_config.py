@@ -12,6 +12,8 @@ from .device_identity import DEVICE_ID_PATTERN
 
 
 PUBLIC_BROKER_HOSTS = ("broker.emqx.io", "broker.hivemq.com")
+PUBLIC_TEST_BROKER = "broker.emqx.io"
+PUBLIC_TEST_PORT = 8883
 
 
 def public_test_topics():
@@ -51,11 +53,12 @@ def mqtt_connection(*, subscribe_only=False):
 
     if settings.MQTT_PUBLIC_TEST_MODE:
         public_test_topics()
+        if host.lower().rstrip(".") != PUBLIC_TEST_BROKER or settings.MQTT_PORT != PUBLIC_TEST_PORT:
+            raise ValidationError("Public Test Mode requires broker.emqx.io:8883 with TLS verification.")
         return {
             "hostname": host,
             "port": settings.MQTT_PORT,
-            "auth": ({"username": settings.MQTT_USERNAME, "password": settings.MQTT_PASSWORD}
-                     if settings.MQTT_USERNAME else None),
+            "auth": None,
             "tls": tls,
         }
 

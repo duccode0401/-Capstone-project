@@ -76,7 +76,8 @@ class FirmwareWireTests(TransactionTestCase):
                             message_id = "0123456789abcdef-0000000" + ("2" if case == "FAILED" else "1")
                             data = {
                                 "protocol_version": 2, "message_id": message_id, "message_type": "log",
-                                "device": ALIAS, "uptime_ms": 10000, "level": "INFO",
+                                "device": ALIAS, "logical_device": "ESP32_001",
+                                "uptime_ms": 10000, "level": "INFO",
                                 "event": "INVALID" if case == "FAILED" else "BOOT",
                             }
                             topic = (ROUTE + "/logs").encode()
