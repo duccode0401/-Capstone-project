@@ -244,6 +244,10 @@ def _timeout_worker():
         time.sleep(30)
 
 
+def on_connect_fail(client, userdata):
+    logger.warning("[MQTT] TCP/TLS connection failed. Check broker service, listener and CA.")
+
+
 def start_mqtt_subscriber():
     test_mode = settings.MQTT_PUBLIC_TEST_MODE
     try:
@@ -257,6 +261,7 @@ def start_mqtt_subscriber():
     client.on_connect = on_connect
     client.on_subscribe = on_subscribe
     client.on_disconnect = on_disconnect
+    client.on_connect_fail = on_connect_fail
     client.on_message = on_message
     client.on_publish = on_publish
     client.smartcharge_ack_mids = {}
@@ -273,4 +278,16 @@ def start_mqtt_subscriber():
 
 
 if __name__ == "__main__":
-    start_mqtt_subscriber()
+    if os.name == "nt":
+        import msvcrt
+
+        lock_dir = settings.BASE_DIR / ".run"
+        lock_dir.mkdir(exist_ok=True)
+        with (lock_dir / "mqtt-subscriber.lock").open("a+b") as lock:
+            try:
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                raise SystemExit("[MQTT] Subscriber is already running for this installation.") from None
+            start_mqtt_subscriber()
+    else:
+        start_mqtt_subscriber()

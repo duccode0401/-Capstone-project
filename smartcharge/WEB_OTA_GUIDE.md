@@ -50,10 +50,11 @@ if (!(Test-Path '.\.venv\Scripts\python.exe')) { python -m venv .venv }
 .\.venv\Scripts\python.exe manage.py check
 .\.venv\Scripts\python.exe manage.py makemigrations --check --dry-run
 .\.venv\Scripts\python.exe manage.py test
-.\.venv\Scripts\python.exe manage.py runserver --insecure 127.0.0.1:8000
+.\.venv\Scripts\python.exe manage.py collectstatic --noinput
+.\.venv\Scripts\python.exe manage.py runserver 127.0.0.1:8000
 ```
 
-`--insecure` phục vụ CSS và JavaScript khi `DEBUG=false` trên server phát triển cục bộ. Trên server triển khai, phục vụ static bằng cấu hình của môi trường triển khai.
+WhiteNoise phục vụ CSS và JavaScript đã được collectstatic khi DEBUG=false.
 
 Mở PowerShell thứ hai trong cùng thư mục.
 

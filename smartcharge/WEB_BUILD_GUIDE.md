@@ -57,7 +57,8 @@ Chạy từng lệnh từ thư mục `smartcharge`. Sau khi đổi chế độ, 
 .\.venv\Scripts\python.exe manage.py check
 .\.venv\Scripts\python.exe manage.py migrate
 .\.venv\Scripts\python.exe manage.py createsuperuser
-.\.venv\Scripts\python.exe manage.py runserver --insecure 127.0.0.1:8000
+.\.venv\Scripts\python.exe manage.py collectstatic --noinput
+.\.venv\Scripts\python.exe manage.py runserver 127.0.0.1:8000
 ```
 
 Mở PowerShell thứ hai trong cùng thư mục. Chạy một tiến trình subscriber cho mỗi môi trường.

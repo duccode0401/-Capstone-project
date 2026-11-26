@@ -9,6 +9,21 @@ from django.http import Http404, HttpResponseBadRequest, HttpResponseNotFound, H
 FIRMWARE_PATH = re.compile(r"/firmware/(manifest|download)/[A-Za-z0-9_.-]{1,63}/[A-Za-z0-9_-]{43}/")
 
 
+class LanHostMiddleware:
+    def __init__(self, get_response):
+        from .lan import refresh_allowed_hosts
+
+        self.get_response = get_response
+        self.refresh_allowed_hosts = refresh_allowed_hosts
+        if settings.DJANGO_LAN_MODE:
+            self.refresh_allowed_hosts()
+
+    def __call__(self, request):
+        if settings.DJANGO_LAN_MODE:
+            self.refresh_allowed_hosts()
+        return self.get_response(request)
+
+
 class FirmwareTunnelMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response

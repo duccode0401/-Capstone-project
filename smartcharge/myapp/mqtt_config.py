@@ -64,11 +64,15 @@ def mqtt_connection(*, subscribe_only=False):
         or not settings.MQTT_PASSWORD
     ):
         raise ValidationError("Configure a private MQTT TLS broker and backend credentials.")
+    try:
+        tls = ssl.create_default_context(cafile=settings.MQTT_CA_FILE or None)
+    except (OSError, ValueError) as exc:
+        raise ValidationError("MQTT_CA_FILE cannot be loaded. Check the Root CA path and PEM format.") from exc
     return {
         "hostname": host,
         "port": settings.MQTT_PORT,
         "auth": {"username": settings.MQTT_USERNAME, "password": settings.MQTT_PASSWORD},
-        "tls": ssl.create_default_context(),
+        "tls": tls,
     }
 
 

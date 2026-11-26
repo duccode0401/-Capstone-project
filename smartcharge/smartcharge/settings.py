@@ -33,6 +33,7 @@ DEBUG = os.environ.get("DJANGO_DEBUG", "").strip().lower() == "true"
 FIRMWARE_HTTPS_BASE_URL = os.environ.get("FIRMWARE_HTTPS_BASE_URL", "").rstrip("/")
 OTA_PUBLIC_HOST = urlsplit(FIRMWARE_HTTPS_BASE_URL).hostname
 ALLOWED_HOSTS = ["localhost", "127.0.0.1", "[::1]"]
+DJANGO_LAN_MODE = os.environ.get("DJANGO_LAN_MODE", "").strip().lower() == "true"
 CSRF_TRUSTED_ORIGINS = []
 if OTA_PUBLIC_HOST:
     ALLOWED_HOSTS.append(OTA_PUBLIC_HOST)
@@ -52,8 +53,10 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    'myapp.middleware.LanHostMiddleware',
     'myapp.middleware.FirmwareTunnelMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -133,7 +136,12 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
-STATIC_URL = 'static/'
+STATIC_URL = "/static/"
+STATIC_ROOT = BASE_DIR / "static-collected"
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": "whitenoise.storage.CompressedStaticFilesStorage"},
+}
 MEDIA_ROOT = BASE_DIR / "media-private"
 
 # OTA/monitoring
@@ -153,6 +161,7 @@ MQTT_BROKER = os.environ.get("MQTT_BROKER", "broker.emqx.io")
 MQTT_PORT = int(os.environ.get("MQTT_PORT", "8883"))
 MQTT_USERNAME = os.environ.get("MQTT_USERNAME", "")
 MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", "")
+MQTT_CA_FILE = os.environ.get("MQTT_CA_FILE", "").strip()
 SEPAY_WEBHOOK_API_KEY = os.environ.get("SEPAY_WEBHOOK_API_KEY", "")
 SEPAY_ACCOUNT_NUMBER = os.environ.get("SEPAY_ACCOUNT_NUMBER", "")
 SEPAY_BANK = os.environ.get("SEPAY_BANK", "")
