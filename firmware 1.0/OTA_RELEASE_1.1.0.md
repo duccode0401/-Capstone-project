@@ -30,8 +30,8 @@ Trong ESP-IDF PowerShell 5.5.1:
 
 ~~~powershell
 Set-ExecutionPolicy -Scope Process Bypass -Force
-. 'C:\Espressif\tools\Microsoft.v5.5.1.PowerShell_profile.ps1'
 Set-Location 'D:\-Capstone-project-main\firmware 1.0'
+. .\load-esp-idf.ps1
 idf.py -B build-smartcharge -D SDKCONFIG=sdkconfig.ota menuconfig
 ~~~
 

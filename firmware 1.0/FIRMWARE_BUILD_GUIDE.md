@@ -6,8 +6,8 @@ Cài ESP-IDF **5.5.1** bằng Espressif Installation Manager. Mở ESP-IDF Power
 
 ~~~powershell
 Set-ExecutionPolicy -Scope Process Bypass -Force
-. 'C:\Espressif\tools\Microsoft.v5.5.1.PowerShell_profile.ps1'
 Set-Location 'D:\-Capstone-project-main\firmware 1.0'
+. .\load-esp-idf.ps1
 idf.py --version
 idf.py -B build-smartcharge -D SDKCONFIG=sdkconfig.ota menuconfig
 ~~~
