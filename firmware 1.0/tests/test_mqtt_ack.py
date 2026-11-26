@@ -45,6 +45,7 @@ static unsigned publishes;
 static bool connected,server_v2_seen;
 static int enqueue_status=1, outbox_size;
 static bool sc_network_ready(void) { return connected; }
+static bool prepare_next_boot_event(outbound_t *message) { return false; }
 static bool xQueueReceive(int q,void *out,int ticks) { return false; }
 static int esp_mqtt_client_get_outbox_size(int c) { return outbox_size; }
 static int esp_mqtt_client_enqueue(int c,const char *topic,const char *json,int len,int qos,int retain,bool store) {
@@ -161,7 +162,7 @@ int main(void) {
         network = (ROOT / "components/sc_core/sc_network.c").read_text(encoding="utf-8")
         core = (ROOT / "components/sc_core/sc_core.c").read_text(encoding="utf-8")
         types = network[network.index("#define SC_ACK_SLOTS"):network.index("static QueueHandle_t")]
-        publish = network[network.index("bool sc_publish("):network.index("void sc_log(")]
+        publish = network[network.index("static bool prepare_message("):network.index("static bool prepare_log(")]
         receive = network[network.index("static bool safe_error_code"):network.index("static void mqtt_error")]
         parser = core[core.index("cJSON *sc_parse_flat_json("):core.index("void sc_relay_off(")]
         wrapper = r'''
@@ -261,3 +262,13 @@ int main(void) {
             self.assertEqual(result.returncode, 0, result.stderr)
             result = subprocess.run([str(binary)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_boot_events_wait_for_ack_subscription_and_are_not_recreated(self):
+        network = (ROOT / "components/sc_core/sc_network.c").read_text(encoding="utf-8")
+        self.assertIn("MQTT_EVENT_SUBSCRIBED && e->msg_id==ack_subscription_id", network)
+        self.assertIn("atomic_store(&ack_subscription_ready,true)", network)
+        self.assertIn("boot_event_index>=3", network)
+        self.assertIn("prepare_next_boot_event(&p->message)", network)
+        start = network[network.index("void sc_network_start("):]
+        self.assertNotIn('sc_log("INFO","BOOT"', start)
+        self.assertNotIn('sc_log(watchdog?', start)

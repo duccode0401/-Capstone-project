@@ -9,14 +9,50 @@ Set-ExecutionPolicy -Scope Process Bypass -Force
 Set-Location 'D:\-Capstone-project-main\firmware 1.0'
 . .\load-esp-idf.ps1
 idf.py --version
-idf.py -B build-smartcharge fullclean
 idf.py -B build-smartcharge build
 python tools\verify_builds.py
 python -m unittest discover -s tests -v
 idf.py -B build-smartcharge size
 ```
 
-Không dùng `sdkconfig.ota`, không build Recovery. `HEADLESS_TEST_MODE` chỉ dành cho board trần; GPIO25 luôn OFF và không có số đo giả.
+`fullclean` chỉ cần khi đổi ESP-IDF, target hoặc cấu hình CMake lớn. Không dùng
+`sdkconfig.ota`, không build Recovery. `HEADLESS_TEST_MODE` chỉ dành cho board
+trần; GPIO25 luôn OFF và không có số đo giả.
+
+## Build và flash thông thường
+
+Đóng mọi Serial Monitor đang giữ cổng COM, ngắt tải điện và chạy:
+
+```powershell
+idf.py -B build-smartcharge -p COM3 build
+idf.py -B build-smartcharge -p COM3 flash
+idf.py -B build-smartcharge -p COM3 monitor
+```
+
+Có thể dùng một lệnh tương đương:
+
+```powershell
+idf.py -B build-smartcharge -p COM3 build flash monitor
+```
+
+`idf.py flash` chỉ ghi bootloader, partition table và factory app theo build hiện
+tại. NVS vẫn ở `0x9000` và không nằm trong `flash_args`, vì vậy Wi-Fi, Setup
+password, HMAC key và MQTT alias được giữ nguyên. Không chạy `erase-flash` và
+không ghi `provisioning/device/nvs.bin` nếu không chủ động muốn thay provisioning.
+
+## ESP-IDF Extension trên VS Code
+
+1. Mở đúng thư mục `firmware 1.0` bằng **File -> Open Folder**.
+2. Chọn `ESP-IDF: Select ESP-IDF Version` và chọn ESP-IDF 5.5.1.
+3. Chọn target `esp32`, cổng COM của board và UART 115200.
+4. Đặt build directory là `build-smartcharge` trong ESP-IDF settings, hoặc dùng
+   terminal tích hợp với các lệnh `idf.py -B build-smartcharge ...` ở trên.
+5. Dùng **ESP-IDF: Build your project**, **Flash your project** và
+   **Monitor your device**. Không chọn erase Flash.
+
+Extension phải hiển thị partition `factory` tại `0x10000`, size `0x3F0000`.
+Nếu còn thấy `ota_0` hoặc offset `0x110000`, đang mở nhầm workspace/build cũ;
+hãy chạy `idf.py -B build-smartcharge fullclean build` rồi kiểm tra lại.
 
 ## Provision ban đầu
 

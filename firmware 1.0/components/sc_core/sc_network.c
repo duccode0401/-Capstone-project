@@ -63,6 +63,9 @@ static char ack_topic[80];
 static char mqtt_base[64];
 static bool headless;
 static bool server_v2_seen;
+static atomic_bool ack_subscription_ready;
+static int ack_subscription_id=-1;
+static unsigned boot_event_index;
 static esp_mqtt_client_handle_t client;
 static EventGroupHandle_t network;
 static atomic_uint dropped,connection_epoch;
@@ -95,32 +98,39 @@ void sc_set_health(bool sensor_ok,bool display_ok)
     atomic_store(&health,(sensor_ok?1u:0u)|(display_ok?2u:0u));
 }
 
-bool sc_publish(const char *topic,const char *json,bool reliable)
+static bool prepare_message(outbound_t *m,const char *topic,const char *json,bool reliable)
 {
-    if(!tx_queue || json[0]!='{') return false;
-    outbound_t m={.queued_at=esp_timer_get_time(),.wait_for_transport=reliable};
-    if(!strcmp(topic,SC_BASE "telemetry")) m.kind="telemetry";
-    else if(!strcmp(topic,SC_BASE "logs")) m.kind="logs";
-    else if(!strcmp(topic,SC_BASE "heartbeat")) m.kind="heartbeat";
-    else if(!strcmp(topic,SC_BASE "status")) m.kind="status";
+    if(!m || json[0]!='{') return false;
+    *m=(outbound_t){.queued_at=esp_timer_get_time(),.wait_for_transport=reliable};
+    if(!strcmp(topic,SC_BASE "telemetry")) m->kind="telemetry";
+    else if(!strcmp(topic,SC_BASE "logs")) m->kind="logs";
+    else if(!strcmp(topic,SC_BASE "heartbeat")) m->kind="heartbeat";
+    else if(!strcmp(topic,SC_BASE "status")) m->kind="status";
     else return false;
-    m.state_changing=reliable;
+    m->state_changing=reliable;
 
-    snprintf(m.topic,sizeof(m.topic),"%s%s",mqtt_base,m.kind);
+    snprintf(m->topic,sizeof(m->topic),"%s%s",mqtt_base,m->kind);
     unsigned last=atomic_load(&tx_sequence);
     do {
         if(last==UINT32_MAX) return false;
     } while(!atomic_compare_exchange_weak(&tx_sequence,&last,last+1));
     uint32_t seq=last+1;
-    snprintf(m.id,sizeof(m.id),"%08"PRIx32"-%08"PRIx32,nonce[0],seq);
-    int n=snprintf(m.json,sizeof(m.json),"{\"protocol_version\":2,\"device\":\"%s\","
+    snprintf(m->id,sizeof(m->id),"%08"PRIx32"-%08"PRIx32,nonce[0],seq);
+    int n=snprintf(m->json,sizeof(m->json),"{\"protocol_version\":2,\"device\":\"%s\","
         "\"message_id\":\"%s\",\"message_type\":\"%s\",\"uptime_ms\":%"PRId64","
         "\"logical_device\":\"%s\",%s",
-        sc_routing_device(),m.id,m.kind,m.queued_at/1000,sc_logical_device(),json+1);
-    if(n<0 || n>=sizeof(m.json)) {
-        ESP_LOGW("TX","FAILED_PAYLOAD_TOO_LARGE id=%s type=%s",m.id,m.kind);
+        sc_routing_device(),m->id,m->kind,m->queued_at/1000,sc_logical_device(),json+1);
+    if(n<0 || n>=sizeof(m->json)) {
+        ESP_LOGW("TX","FAILED_PAYLOAD_TOO_LARGE id=%s type=%s",m->id,m->kind);
         return false;
     }
+    return true;
+}
+bool sc_publish(const char *topic,const char *json,bool reliable)
+{
+    if(!tx_queue) return false;
+    outbound_t m;
+    if(!prepare_message(&m,topic,json,reliable)) return false;
     if(reliable) atomic_fetch_add(&transport_wait,1);
     BaseType_t queued=xQueueSend(tx_queue,&m,0);
     if(queued!=pdTRUE) {
@@ -133,10 +143,10 @@ bool sc_publish(const char *topic,const char *json,bool reliable)
              m.id,sc_routing_device(),m.kind,m.topic,sc_network_ready()?"":" offline");
     return true;
 }
-void sc_log(const char *level,const char *event,const char *message)
+static bool prepare_log(outbound_t *out,const char *level,const char *event,const char *message)
 {
     /* Only fixed application events; never forward arbitrary ESP_LOG or command payloads. */
-    cJSON *j=cJSON_CreateObject(); if(!j) return;
+    cJSON *j=cJSON_CreateObject(); if(!j) return false;
     wifi_ap_record_t ap;
     int rssi=esp_wifi_sta_get_ap_info(&ap)==ESP_OK?ap.rssi:0;
     cJSON_AddStringToObject(j,"level",!strcmp(level,"WARN")?"WARNING":level);
@@ -152,8 +162,23 @@ void sc_log(const char *level,const char *event,const char *message)
     cJSON_AddNumberToObject(j,"rssi",rssi);
     cJSON_AddBoolToObject(j,"mqtt_connected",sc_network_ready());
     char json[768];
-    if(cJSON_PrintPreallocated(j,json,sizeof(json),false)) sc_publish(SC_BASE "logs",json,false);
+    bool prepared=cJSON_PrintPreallocated(j,json,sizeof(json),false) &&
+        prepare_message(out,SC_BASE "logs",json,false);
     cJSON_Delete(j);
+    return prepared;
+}
+void sc_log(const char *level,const char *event,const char *message)
+{
+    outbound_t message_out;
+    if(!tx_queue || !prepare_log(&message_out,level,event,message)) return;
+    if(xQueueSend(tx_queue,&message_out,0)!=pdTRUE) {
+        atomic_fetch_add(&dropped,1);
+        ESP_LOGW("TX","FAILED_QUEUE_FULL id=%s topic=%s",message_out.id,message_out.topic);
+    } else if(sc_serial_debug()) {
+        ESP_LOGI("TX","QUEUED id=%s device=%s type=%s topic=%s%s",message_out.id,
+                 sc_routing_device(),message_out.kind,message_out.topic,
+                 sc_network_ready()?"":" offline");
+    }
 }
 static bool topic_is(esp_mqtt_event_handle_t e,const char *topic)
 {
@@ -226,15 +251,22 @@ static void mqtt_event(void *arg,esp_event_base_t base,int32_t id,void *data)
     } else if(id==MQTT_EVENT_ERROR) {
         mqtt_error(e->error_handle);
     } else if(id==MQTT_EVENT_CONNECTED) {
-        if(esp_mqtt_client_subscribe(client,ack_topic,1)<0)
+        ack_subscription_id=esp_mqtt_client_subscribe(client,ack_topic,1);
+        atomic_store(&ack_subscription_ready,false);
+        if(ack_subscription_id<0)
             ESP_LOGW("MQTT","ACK subscribe failed topic=%s",ack_topic);
         if(sc_serial_debug()) ESP_LOGI("MQTT","CONNECTED ACK topic=%s",ack_topic);
         else ESP_LOGI("MQTT","CONNECTED");
         xEventGroupSetBits(network,MQTT_UP);
         if(sc_command_auth_ready() && esp_mqtt_client_subscribe(client,SC_BASE "orders",1)<0)
             sc_log("WARN","MQTT_ERROR","Order subscription enqueue failed");
+    } else if(id==MQTT_EVENT_SUBSCRIBED && e->msg_id==ack_subscription_id) {
+        atomic_store(&ack_subscription_ready,true);
+        ESP_LOGI("MQTT","ACK subscription ready topic=%s",ack_topic);
         sc_log("INFO","MQTT_CONNECTED","MQTT session connected");
     } else if(id==MQTT_EVENT_DISCONNECTED) {
+        atomic_store(&ack_subscription_ready,false);
+        ack_subscription_id=-1;
         xEventGroupClearBits(network,MQTT_UP);
         atomic_fetch_add(&connection_epoch,1);
         xQueueReset(rx_queue);
@@ -359,6 +391,29 @@ static void serial_ack(const pending_t *p,const ack_event_t *a,int64_t now)
         ESP_LOGI("ACK","[%s] #%03u | SUCCESS | %"PRId64"ms",stamp,short_id(a->id),elapsed);
     }
 }
+static bool prepare_next_boot_event(outbound_t *message)
+{
+    if(!atomic_load(&ack_subscription_ready) || boot_event_index>=3) return false;
+    char reason[64];
+    switch(boot_event_index) {
+    case 0:
+        if(!prepare_log(message,"INFO","BOOT","Application started")) return false;
+        break;
+    case 1:
+        if(!prepare_log(message,"INFO","RELAY_OFF","Relay OFF at startup")) return false;
+        break;
+    default: {
+        esp_reset_reason_t reset=esp_reset_reason();
+        snprintf(reason,sizeof(reason),"Reset reason=%d",reset);
+        bool watchdog=reset==ESP_RST_TASK_WDT || reset==ESP_RST_INT_WDT || reset==ESP_RST_WDT;
+        if(!prepare_log(message,watchdog?"WARN":"INFO",
+                        watchdog?"WATCHDOG_RESET":"REBOOT_REASON",reason)) return false;
+        break;
+    }
+    }
+    boot_event_index++;
+    return true;
+}
 static void transport_settled(pending_t *p)
 {
     if(!p->transport_done && p->message.wait_for_transport) atomic_fetch_sub(&transport_wait,1);
@@ -407,7 +462,8 @@ static void service_pending(int64_t now)
     for(size_t i=0;i<SC_ACK_SLOTS;i++) {
         pending_t *p=&pending[i];
         if(!p->active) {
-            if(xQueueReceive(tx_queue,&p->message,0)!=pdTRUE) continue;
+            if(!prepare_next_boot_event(&p->message) &&
+               xQueueReceive(tx_queue,&p->message,0)!=pdTRUE) continue;
             p->active=true;
             p->broker_ack=p->server_terminal=p->transport_done=p->retry_requested=false;
             p->attempts=0;
@@ -618,10 +674,4 @@ void sc_network_start(void (*cb)(bool),void (*show_setup)(const char *,const cha
     ESP_ERROR_CHECK(esp_mqtt_client_register_event(client,ESP_EVENT_ANY_ID,mqtt_event,NULL));
     ESP_ERROR_CHECK(xTaskCreate(network_worker,"sc_network",5120,NULL,3,NULL)==pdPASS?ESP_OK:ESP_ERR_NO_MEM);
     ESP_ERROR_CHECK(esp_wifi_start());
-    sc_log("INFO","BOOT","Application started");
-    sc_log("INFO","RELAY_OFF","Relay OFF at startup");
-    char reason[64]; snprintf(reason,sizeof(reason),"Reset reason=%d",esp_reset_reason());
-    esp_reset_reason_t reset=esp_reset_reason();
-    bool watchdog=reset==ESP_RST_TASK_WDT || reset==ESP_RST_INT_WDT || reset==ESP_RST_WDT;
-    sc_log(watchdog?"WARN":"INFO",watchdog?"WATCHDOG_RESET":"REBOOT_REASON",reason);
 }
