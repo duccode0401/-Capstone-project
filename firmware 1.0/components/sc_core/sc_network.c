@@ -65,6 +65,8 @@ static int incoming_total,incoming_used;
 static bool incoming_ota,incoming_valid;
 #define WIFI_UP BIT0
 #define MQTT_UP BIT1
+#define WIFI_LOG_UP BIT2
+#define WIFI_LOG_DOWN BIT3
 
 uint32_t sc_dropped_messages(void) { return atomic_load(&dropped); }
 uint32_t sc_network_epoch(void) { return atomic_load(&connection_epoch); }
@@ -285,18 +287,29 @@ static void wifi_event(void *arg,esp_event_base_t base,int32_t id,void *data)
     else if(base==WIFI_EVENT && id==WIFI_EVENT_STA_DISCONNECTED) {
         xEventGroupClearBits(network,WIFI_UP|MQTT_UP);
         atomic_fetch_add(&connection_epoch,1);
-        ESP_LOGW("WIFI","DISCONNECTED, reconnecting");
         if(wifi_cb) wifi_cb(false);
-        sc_log("WARN","WIFI_DISCONNECTED","Wi-Fi disconnected; reconnecting");
-        /* esp_wifi_connect is asynchronous; bounded driver retry interval. */
+        xEventGroupSetBits(network,WIFI_LOG_DOWN);
         esp_wifi_connect();
     } else if(base==IP_EVENT && id==IP_EVENT_STA_GOT_IP) {
-        xEventGroupSetBits(network,WIFI_UP);
-        const ip_event_got_ip_t *ip=data;
-        wifi_ap_record_t ap;
-        if(esp_wifi_sta_get_ap_info(&ap)==ESP_OK)
-            ESP_LOGI("WIFI","IP=" IPSTR " RSSI=%d dBm",IP2STR(&ip->ip_info.ip),ap.rssi);
+        xEventGroupSetBits(network,WIFI_UP|WIFI_LOG_UP);
         if(wifi_cb) wifi_cb(true);
+    }
+}
+static void report_wifi_events(void)
+{
+    EventBits_t events=xEventGroupWaitBits(network,WIFI_LOG_UP|WIFI_LOG_DOWN,pdTRUE,pdFALSE,0);
+    if(events&WIFI_LOG_DOWN) {
+        ESP_LOGW("WIFI","DISCONNECTED, reconnecting");
+        sc_log("WARN","WIFI_DISCONNECTED","Wi-Fi disconnected; reconnecting");
+    }
+    if(events&WIFI_LOG_UP) {
+        esp_netif_t *sta=esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        esp_netif_ip_info_t ip;
+        wifi_ap_record_t ap;
+        if(sta && esp_netif_get_ip_info(sta,&ip)==ESP_OK &&
+           esp_wifi_sta_get_ap_info(&ap)==ESP_OK) {
+            ESP_LOGI("WIFI","IP=" IPSTR " RSSI=%d dBm",IP2STR(&ip.ip),ap.rssi);
+        }
         sc_log("INFO","WIFI_CONNECTED","Wi-Fi obtained IP address");
     }
 }
@@ -438,6 +451,7 @@ static void network_worker(void *arg)
             next_start=now+5000000;
             if(!mqtt_started) sc_log("WARN","MQTT_ERROR","Failed to start MQTT task");
         }
+        report_wifi_events();
         service_pending(now);
         if(now-last_diag>=10000000LL) {
             sc_memory_log();
