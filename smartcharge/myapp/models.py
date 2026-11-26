@@ -53,6 +53,10 @@ class ChargerDevice(models.Model):
 
     firmware_confirmed_at = models.DateTimeField(null=True, blank=True)
 
+    class Meta:
+        verbose_name = "Thiết bị sạc"
+        verbose_name_plural = "Thiết bị sạc"
+
     def __str__(self):
         return self.display_label
 
@@ -87,6 +91,10 @@ class ChargingSession(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        verbose_name = "Phiên sạc"
+        verbose_name_plural = "Phiên sạc"
+
     @property
     def device_id_str(self):
         return self.device.logical_id if self.device else "N/A"
@@ -105,6 +113,8 @@ class ChargerPort(models.Model):
 
     class Meta:
         unique_together = ("device", "port_no")
+        verbose_name = "Cổng sạc"
+        verbose_name_plural = "Cổng sạc"
 
     def __str__(self):
         return f"{self.device.device_id} - Port {self.port_no}"

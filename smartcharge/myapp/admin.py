@@ -1,6 +1,11 @@
 from django.contrib import admin
 
-from .models import ChargerDevice, ChargerPort, ChargingSession, DeviceLog, DeviceTelemetry
+from .models import ChargerDevice, ChargerPort, ChargingSession
+
+admin.site.site_header = "Quản trị SmartCharge"
+admin.site.site_title = "SmartCharge Administration"
+admin.site.index_title = "Quản trị hệ thống SmartCharge"
+admin.site.site_url = "/dashboard/devices/"
 
 
 @admin.register(ChargerDevice)
@@ -23,22 +28,3 @@ class ChargingSessionAdmin(admin.ModelAdmin):
     ordering = ("-created_at",)
 
 
-@admin.register(DeviceTelemetry)
-class DeviceTelemetryAdmin(admin.ModelAdmin):
-    list_display = ("device", "port", "voltage_v", "current_a", "power_w", "energy_total_wh", "charging_status", "received_at")
-    list_filter = ("device", "port", "charging", "charging_status")
-    readonly_fields = tuple(field.name for field in DeviceTelemetry._meta.fields)
-
-    def has_add_permission(self, request):
-        return False
-
-
-@admin.register(DeviceLog)
-class DeviceLogAdmin(admin.ModelAdmin):
-    list_display = ("device", "level", "event", "message", "uptime_ms", "received_at")
-    list_filter = ("device", "level", "event")
-    search_fields = ("device__device_id", "event", "message")
-    readonly_fields = tuple(field.name for field in DeviceLog._meta.fields)
-
-    def has_add_permission(self, request):
-        return False

@@ -244,5 +244,8 @@ class MqttV2Tests(TransactionTestCase):
         self.client.force_login(user)
         response = self.client.get(logs, {"device": "ESP32_001", "type": "heartbeat", "outcome": "SUCCESS"})
         self.assertContains(response, self.message_id)
-        self.assertNotContains(self.client.get(logs, {"outcome": "DUPLICATE"}), self.message_id)
+        self.assertRedirects(
+            self.client.get(logs, {"outcome": "DUPLICATE"}),
+            reverse("myapp:devices_dashboard"),
+        )
         self.assertContains(self.client.get(dashboard), "HEADLESS")

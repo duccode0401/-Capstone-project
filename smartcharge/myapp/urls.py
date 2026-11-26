@@ -13,8 +13,10 @@ urlpatterns = [
     path("api/charger/report-port/", views.api_report_port, name="api_report_port"),
     path("dashboard/sessions/", views.session_dashboard, name="session_dashboard"),
     path("dashboard/devices/", views.devices_dashboard, name="devices_dashboard"),
+    path("dashboard/devices/<int:pk>/", views.device_detail, name="device_detail"),
     path("dashboard/logs/", views.device_logs_dashboard, name="device_logs_dashboard"),
     path("api/devices/status/", views.device_status_api, name="device_status_api"),
+    path("api/devices/<int:pk>/status/", views.device_status_api, name="device_status_detail_api"),
     path("api/devices/logs/", views.recent_logs_api, name="recent_logs_api"),
 ]
 

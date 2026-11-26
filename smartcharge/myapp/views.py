@@ -12,7 +12,7 @@ load_dotenv(settings.BASE_DIR / ".env")
 from datetime import timedelta
 
 from django.http import JsonResponse
-from django.shortcuts import redirect, render
+from django.shortcuts import get_object_or_404, redirect, render
 from django.core.exceptions import PermissionDenied
 from django.core.paginator import Paginator
 from django.contrib.auth.decorators import permission_required
@@ -434,8 +434,104 @@ def _device_snapshot(device, now):
 @_staff_permission("myapp.view_devicetelemetry")
 def devices_dashboard(request):
     now = timezone.now()
-    devices = [_device_snapshot(device, now) for device in ChargerDevice.objects.all()]
-    return render(request, "myapp/device_dashboard.html", {"devices": devices})
+    search = request.GET.get("q", "").strip()[:100]
+    state = request.GET.get("state", "").lower()
+    all_snapshots = []
+    for device in ChargerDevice.objects.order_by("device_id"):
+        item = _device_snapshot(device, now)
+        item["pk"] = device.pk
+        item["charging"] = item["charging_status"] == "CHARGING" or bool(item["relay_on"])
+        all_snapshots.append(item)
+    snapshots = []
+    for item in all_snapshots:
+        if search and search.lower() not in f"{item['device_id']} {item['routing_id']} {item['name']}".lower():
+            continue
+        if state == "online" and not item["online"]:
+            continue
+        if state == "offline" and item["online"]:
+            continue
+        if state == "charging" and not item["charging"]:
+            continue
+        if state == "idle" and (not item["online"] or item["charging"]):
+            continue
+        snapshots.append(item)
+    stats = {
+        "total": len(all_snapshots),
+        "online": sum(item["online"] for item in all_snapshots),
+        "offline": sum(not item["online"] for item in all_snapshots),
+        "charging": sum(item["charging_status"] == "CHARGING" or bool(item["relay_on"]) for item in all_snapshots),
+    }
+    page = Paginator(snapshots, 20).get_page(request.GET.get("page"))
+    query = request.GET.copy(); query.pop("page", None)
+    return render(request, "myapp/device_dashboard.html", {
+        "page": page, "stats": stats, "search": search, "state": state,
+        "query": query.urlencode(),
+    })
+
+
+DETAIL_TABS = {"overview", "telemetry", "mqtt", "events", "sessions"}
+
+
+@_staff_permission("myapp.view_chargerdevice")
+def device_detail(request, pk):
+    device = get_object_or_404(ChargerDevice, pk=pk)
+    tab = request.GET.get("tab", "overview")
+    if tab not in DETAIL_TABS:
+        tab = "overview"
+    permission = {
+        "telemetry": "myapp.view_devicetelemetry", "mqtt": "myapp.view_devicelog",
+        "events": "myapp.view_devicelog", "sessions": "myapp.view_chargingsession",
+    }.get(tab)
+    if permission and not request.user.has_perm(permission):
+        raise PermissionDenied
+    now = timezone.now()
+    snapshot = _device_snapshot(device, now)
+    rows = None
+    if tab == "telemetry":
+        rows = DeviceTelemetry.objects.filter(device=device)
+    elif tab == "mqtt":
+        rows = _filter_mqtt_attempts(request, MqttAttempt.objects.filter(device_id=device.device_id))
+    elif tab == "events":
+        rows = _filter_device_events(request, DeviceLog.objects.filter(device=device))
+    elif tab == "sessions":
+        rows = ChargingSession.objects.filter(device=device).order_by("-created_at")
+    page = Paginator(rows, 25).get_page(request.GET.get("page")) if rows is not None else None
+    query = request.GET.copy(); query.pop("page", None)
+    return render(request, "myapp/device_detail.html", {
+        "device": device, "snapshot": snapshot, "tab": tab, "page": page,
+        "query": query.urlencode(), "mqtt_types": ("heartbeat", "telemetry", "logs", "status"),
+        "outcomes": ("SUCCESS", "FAILED", "DUPLICATE"),
+    })
+
+
+def _filter_mqtt_attempts(request, queryset):
+    kind = request.GET.get("type", "")
+    outcome = request.GET.get("outcome", "")
+    ack = request.GET.get("ack", "")
+    if kind in {"heartbeat", "telemetry", "logs", "status"}:
+        queryset = queryset.filter(message_type=kind)
+    if outcome in {"SUCCESS", "FAILED", "DUPLICATE"}:
+        queryset = queryset.filter(status=outcome)
+    if ack in {"NOT_SENT", "QUEUED", "BROKER_CONFIRMED", "BROKER_REJECTED", "PUBLISH_FAILED"}:
+        queryset = queryset.filter(ack_status=ack)
+    return _apply_date_range(request, queryset)
+
+
+def _filter_device_events(request, queryset):
+    level = request.GET.get("level", "")
+    if level in {"INFO", "WARNING", "ERROR"}:
+        queryset = queryset.filter(level=level)
+    return _apply_date_range(request, queryset)
+
+
+def _apply_date_range(request, queryset):
+    for key, lookup in (("since", "gte"), ("until", "lte")):
+        parsed = parse_datetime(request.GET.get(key, "")[:40])
+        if parsed:
+            if timezone.is_naive(parsed):
+                parsed = timezone.make_aware(parsed, timezone.get_default_timezone())
+            queryset = queryset.filter(**{f"received_at__{lookup}": parsed})
+    return queryset
 
 
 LOG_CATEGORIES = ("BOOT", "WIFI", "MQTT", "HEARTBEAT", "TELEMETRY", "ACK", "ERROR")
@@ -457,6 +553,8 @@ def _event_prefixes(field, prefixes):
 @_staff_permission("myapp.view_devicelog")
 def device_logs_dashboard(request):
     selected_device = request.GET.get("device", "")
+    if not selected_device:
+        return redirect("myapp:devices_dashboard")
     category = request.GET.get("category", "")
     kind = request.GET.get("type", "")
     outcome = request.GET.get("outcome", "")
@@ -541,7 +639,11 @@ def device_logs_dashboard(request):
 def device_status_api(request):
     now = timezone.now()
     payload = []
-    for device in ChargerDevice.objects.all():
+    devices = ChargerDevice.objects.all()
+    pk = request.resolver_match.kwargs.get("pk")
+    if pk is not None:
+        devices = devices.filter(pk=pk)
+    for device in devices:
         item = _device_snapshot(device, now)
         for key in ("last_update", "last_heartbeat"):
             local = timezone.localtime(item[key]) if item[key] else None
