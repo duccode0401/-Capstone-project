@@ -12,3 +12,4 @@ void display_show_payment(void);
 void display_show_charging(int money, float target_Wh);
 void display_show_done(void);
 void display_set_wifi_connected(bool connected);
+void display_show_wifi_setup(const char *ssid,const char *setup_password);

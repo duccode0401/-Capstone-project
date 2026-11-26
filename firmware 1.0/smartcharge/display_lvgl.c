@@ -20,6 +20,7 @@
 
 #include "charge_test_screen.h"
 #include "display_lvgl.h"
+#include "sc_core.h"
 #include "esp_log.h"
 
 #define LCD_HOST VSPI_HOST
@@ -179,7 +180,7 @@ static void lvgl_task(void *arg)
         _lock_release(&lvgl_api_lock);
         atomic_store(&render_tick_ms,(uint32_t)(esp_timer_get_time()/1000));
         if(esp_timer_get_time()-last_stack_log>=10000000LL) {
-            ESP_LOGI("MEM","task=lvgl stack_watermark=%u B",(unsigned)uxTaskGetStackHighWaterMark(NULL));
+            if(sc_serial_debug()) ESP_LOGI("MEM","task=lvgl stack_watermark=%u B",(unsigned)uxTaskGetStackHighWaterMark(NULL));
             last_stack_log=esp_timer_get_time();
         }
         // LV_NO_TIMER_READY may be UINT32_MAX. Poll regularly so changes
@@ -265,5 +266,12 @@ void display_set_wifi_connected(bool connected)
 {
     _lock_acquire(&lvgl_api_lock);
     charge_test_screen_set_wifi(connected);
+    _lock_release(&lvgl_api_lock);
+}
+
+void display_show_wifi_setup(const char *ssid,const char *setup_password)
+{
+    _lock_acquire(&lvgl_api_lock);
+    charge_test_screen_set_setup(ssid,setup_password);
     _lock_release(&lvgl_api_lock);
 }

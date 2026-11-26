@@ -15,3 +15,4 @@ void charge_test_screen_set_energy(float energy_Wh, float target_Wh);
 void charge_test_screen_set_charging(int money, float target_Wh);
 void charge_test_screen_set_done(void);
 void charge_test_screen_set_wifi(bool connected);
+void charge_test_screen_set_setup(const char *ssid,const char *setup_password);

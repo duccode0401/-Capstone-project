@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet("build", "flash", "monitor", "flash-monitor", "recovery-build")]
+    [ValidateSet("build", "monitor", "size", "test")]
     [string]$Action = "build",
     [string]$Port = "COM3"
 )
@@ -9,16 +9,14 @@ if (-not (Test-Path -LiteralPath $idfProfile)) { throw "ESP-IDF profile not foun
 . $idfProfile
 Push-Location $PSScriptRoot
 try {
-    if ($Action -eq "recovery-build") {
-        Push-Location (Join-Path $PSScriptRoot "recovery")
-        try { & idf.py -B build-recovery -D SDKCONFIG=sdkconfig.recovery build }
-        finally { Pop-Location }
-    } elseif ($Action -eq "build") {
-        & idf.py -B build-smartcharge -D SDKCONFIG=sdkconfig.ota build
+    if ($Action -eq "build") {
+        & idf.py -B build-smartcharge build
     } elseif ($Action -eq "monitor") {
-        & idf.py -B build-smartcharge -D SDKCONFIG=sdkconfig.ota -p $Port monitor
+        & idf.py -B build-smartcharge -p $Port monitor
+    } elseif ($Action -eq "size") {
+        & idf.py -B build-smartcharge size
     } else {
-        throw "Use the explicit initial-flash procedure in OTA_MQTT_PROTOCOL.md. Generic flash is disabled to protect Recovery and provisioning."
+        & python -m unittest discover -s tests -v
     }
     if ($LASTEXITCODE -ne 0) { throw "ESP-IDF command failed: $LASTEXITCODE" }
 } finally { Pop-Location }

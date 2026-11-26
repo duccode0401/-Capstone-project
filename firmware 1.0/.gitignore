@@ -5,9 +5,9 @@
 /sdkconfig
 /.vscode/
 /build-smartcharge/
+/build-headless/
+/sdkconfig.headless*
 /recovery/build-recovery/
-/sdkconfig.ota*
-/recovery/sdkconfig.recovery*
 /provisioning/
 __pycache__/
 /build-host/

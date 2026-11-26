@@ -1,14 +1,17 @@
 # put here your custom config value
-menu "Example Configuration"
-config ESP_WIFI_SSID
-    string "WiFi SSID"
-    default ""
+menu "SmartCharge"
+config HEADLESS_TEST_MODE
+    bool "HEADLESS_TEST_MODE (public bench only)"
+    default n
     help
-	SSID (network name) for the example to connect to.
+        Run Wi-Fi and diagnostics without LCD, ADC or charging hardware.
+config SC_SETUP_TIMEOUT_MINUTES
+    int "Wi-Fi Setup Mode timeout (minutes)"
+    range 3 30
+    default 10
 
-config ESP_WIFI_PASSWORD
-    string "WiFi Password"
-    default ""
-    help
-	WiFi password (WPA or WPA2) for the example to use.
+config SC_WIFI_FAILURES_BEFORE_SETUP
+    int "Failed station connections before Setup Mode"
+    range 3 20
+    default 6
 endmenu

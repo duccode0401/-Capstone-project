@@ -139,3 +139,12 @@ void charge_test_screen_set_wifi(bool connected)
     lv_obj_set_style_text_color(wifi_label,
         connected ? lv_color_hex(0x72F0B8) : lv_color_hex(0xFFD166), 0);
 }
+
+void charge_test_screen_set_setup(const char *ssid,const char *setup_password)
+{
+    char text[96];
+    snprintf(text,sizeof(text),"SETUP: %s\nPASS: %s",ssid,setup_password);
+    lv_label_set_text(charge_label,text);
+    lv_obj_set_style_text_font(charge_label,&lv_font_montserrat_12,0);
+    lv_obj_set_style_text_color(charge_label,lv_color_hex(0xFFD166),0);
+}

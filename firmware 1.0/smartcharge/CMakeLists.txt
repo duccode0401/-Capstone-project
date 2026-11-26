@@ -8,6 +8,7 @@ idf_component_register(
         "display_lvgl.c"
         "screens/charge_test_screen.c"
         "wifi_mqtt.c"
+        "signed_order.c"
     INCLUDE_DIRS
         "."
         "screens"
@@ -23,7 +24,6 @@ idf_component_register(
         esp_lcd
         esp_timer
         spi_flash
-        app_update
         esp_system
         esp_wifi
         esp_event
