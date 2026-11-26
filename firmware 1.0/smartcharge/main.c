@@ -3,6 +3,7 @@
 #include "wifi_mqtt.h"
 #include "sc_core.h"
 #include "signed_order.h"
+#include "sdkconfig.h"
 #include <time.h>
 #include <stdio.h>
 #include <string.h>
@@ -219,6 +220,25 @@ void app_main(void)
     const esp_partition_t *running=esp_ota_get_running_partition();
     boot_candidate=running && esp_ota_get_state_partition(running,&initial_state)==ESP_OK &&
                    initial_state==ESP_OTA_IMG_PENDING_VERIFY;
+#ifdef CONFIG_HEADLESS_TEST_MODE
+    char headless_state[24]={0};
+    if(!sc_config.mqtt_public_test_mode ||
+       sc_get_state(headless_state,sizeof(headless_state))!=ESP_OK ||
+       strcmp(headless_state,"bootstrapped")) {
+        ESP_LOGE("BOOT","Headless requires physical public-test bootstrap");
+        if(boot_candidate) esp_ota_mark_app_invalid_rollback_and_reboot();
+        return;
+    }
+    esp_err_t confirm=sc_confirm_healthy();
+    if(confirm!=ESP_OK) {
+        ESP_LOGE("BOOT","Headless bootstrap failed: %s",esp_err_to_name(confirm));
+        if(boot_candidate) esp_ota_mark_app_invalid_rollback_and_reboot();
+        return;
+    }
+    sc_network_start_headless();
+    sc_log("INFO","HEALTHY","Headless public-test application running");
+    return;
+#endif
     const esp_timer_create_args_t guard={.callback=health_timeout,.name="boot_health"};
     ESP_ERROR_CHECK(esp_timer_create(&guard,&health_deadline));
     ESP_ERROR_CHECK(esp_timer_start_once(health_deadline,90000000LL));
@@ -251,6 +271,7 @@ void app_main(void)
             update_energy(&meter);
             display_update_power(meter.Irms,meter.Vrms,meter.P);
         }
+        sc_set_health(sample_valid,display_is_healthy());
         confirm_startup(); report_version(); publish_done();
         sc_command_t command;
         /* Bound work per measurement iteration; all session/relay state has one owner. */

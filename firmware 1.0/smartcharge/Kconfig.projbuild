@@ -1,5 +1,10 @@
 # put here your custom config value
-menu "Example Configuration"
+menu "SmartCharge"
+config HEADLESS_TEST_MODE
+    bool "HEADLESS_TEST_MODE (public bench only)"
+    default n
+    help
+        Run Wi-Fi and diagnostics without LCD, ADC or charging hardware.
 config ESP_WIFI_SSID
     string "WiFi SSID"
     default ""

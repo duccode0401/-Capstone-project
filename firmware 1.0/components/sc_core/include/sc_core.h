@@ -53,6 +53,8 @@ bool sc_update_retryable(esp_err_t error);
 bool sc_verify_hmac(const char *text, const char *hex);
 void sc_network_start(void (*wifi_changed)(bool));
 bool sc_network_ready(void);
+void sc_set_health(bool sensor_ok, bool display_ok);
+void sc_network_start_headless(void);
 uint32_t sc_network_epoch(void);
 bool sc_download_ready(void);
 bool sc_receive(sc_command_t *command);
