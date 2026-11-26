@@ -24,7 +24,6 @@ idf_component_register(
         esp_lcd
         esp_timer
         spi_flash
-        app_update
         esp_system
         esp_wifi
         esp_event

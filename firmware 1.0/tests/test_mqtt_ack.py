@@ -43,7 +43,6 @@ static char ack_topic[80];
 static int ack_queue, tx_queue, client;
 static unsigned publishes;
 static bool connected,server_v2_seen;
-static struct { bool mqtt_public_signed_mode; } sc_config;
 static int enqueue_status=1, outbox_size;
 static bool sc_network_ready(void) { return connected; }
 static bool xQueueReceive(int q,void *out,int ticks) { return false; }
@@ -127,12 +126,6 @@ int main(void) {
     service_pending(5000000);
     assert(!p->active && publishes==1);
     reset();
-    p->message.kind="ota";
-    service_pending(0);
-    handle_ack_event(&broker,1000);
-    assert(!p->active && publishes==1 && stats_ok==0);
-
-    reset();
     connected=false;
     service_pending(0);
     assert(publishes==0 && p->due==2000000);
@@ -170,7 +163,7 @@ int main(void) {
         types = network[network.index("#define SC_ACK_SLOTS"):network.index("static QueueHandle_t")]
         publish = network[network.index("bool sc_publish("):network.index("void sc_log(")]
         receive = network[network.index("static bool safe_error_code"):network.index("static void mqtt_error")]
-        parser = core[core.index("cJSON *sc_parse_flat_json("):core.index("static esp_err_t put_string(")]
+        parser = core[core.index("cJSON *sc_parse_flat_json("):core.index("void sc_relay_off(")]
         wrapper = r'''
 #include <assert.h>
 #include <stdint.h>
@@ -180,7 +173,6 @@ int main(void) {
 #include <inttypes.h>
 #include "cJSON.h"
 #define SC_BASE "iot/charge_station/v1/"
-#define SC_PUBLIC_TEST_BASE "iot/charge_station/test/"
 #define pdTRUE 1
 #define ESP_LOGI(tag,fmt,...) ((void)0)
 #define ESP_LOGW(tag,fmt,...) ((void)0)
@@ -195,7 +187,7 @@ typedef struct {
 } *esp_mqtt_event_handle_t;
 '''
         wrapper += types + r'''
-static struct { bool mqtt_public_test_mode; char device[32]; } sc_config={true,"SC_TEST_0123456789abcdef"};
+static struct { char device[32]; } sc_config={"ESP32_001"};
 static uint32_t nonce[]={0xa83f921b,0x01234567};
 static unsigned tx_sequence, transport_wait, dropped;
 static int tx_queue=1,ack_queue=2;
@@ -207,7 +199,7 @@ static bool got_ack;
 static int64_t esp_timer_get_time(void) { return 10000000; }
 static bool sc_network_ready(void) { return true; }
 static bool sc_serial_debug(void) { return false; }
-static const char *sc_logical_device(void) { return "ESP32_001"; }
+static const char *sc_logical_device(void) { return sc_config.device; }
 static BaseType_t xQueueSend(int q,const void *item,int ticks) {
     if(!allow_queue) return false;
     if(q==tx_queue) memcpy(&sent,item,sizeof(sent));
@@ -229,9 +221,9 @@ static void server(const char *device, bool retained, bool valid) {
     assert(got_ack==valid);
 }
 int main(void) {
-    const char *data="{\"device\":\"SC_TEST_0123456789abcdef\",\"voltage_v\":1.5}";
+    const char *data="{\"device\":\"ESP32_001\",\"voltage_v\":1.5}";
     assert(sc_publish(SC_BASE "telemetry",data,false));
-    assert(!strcmp(sent.topic,SC_PUBLIC_TEST_BASE "SC_TEST_0123456789abcdef/telemetry"));
+    assert(!strcmp(sent.topic,SC_BASE "telemetry"));
     cJSON *json=sc_parse_flat_json(sent.json,sizeof(sent.json)-1);
     assert(json);
     assert(cJSON_GetObjectItemCaseSensitive(json,"protocol_version")->valueint==2);

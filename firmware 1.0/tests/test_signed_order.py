@@ -11,7 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
-from ota_protocol import order_text, sign
+from protocol import order_text, sign
 
 
 class SignedOrderTests(unittest.TestCase):
@@ -35,12 +35,12 @@ class SignedOrderTests(unittest.TestCase):
 #include "cJSON.h"
 #define SC_MESSAGE_MAX 1536
 extern struct test_config { char device[32]; } sc_config;
-bool sc_ota_enabled(void);
+bool sc_command_auth_ready(void);
 bool sc_verify_hmac(const char *,const char *);
 cJSON *sc_parse_flat_json(const char *,size_t);
 """, encoding="ascii")
         core = (ROOT / "components/sc_core/sc_core.c").read_text(encoding="utf-8")
-        parser = core[core.index("cJSON *sc_parse_flat_json("):core.index("static esp_err_t put_string(")]
+        parser = core[core.index("cJSON *sc_parse_flat_json("):core.index("void sc_relay_off(")]
         replay = core[core.index("esp_err_t sc_commit_order_sequence("):core.index("bool sc_verify_hmac(")]
         wrapper = build / "wrapper.c"
         wrapper.write_text("""
@@ -61,7 +61,7 @@ static uint32_t last, pending;
 typedef int (*verify_t)(const char *,const char *);
 static verify_t verifier;
 struct test_config sc_config={"ESP32_001"};
-bool sc_ota_enabled(void) { return true; }
+bool sc_command_auth_ready(void) { return true; }
 bool sc_verify_hmac(const char *text,const char *hex) { return verifier(text,hex)!=0; }
 static int nvs_get_u32(int h,const char *key,uint32_t *value) {
     if(strcmp(key,"order_seq")) return 3;

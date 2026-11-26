@@ -1,12 +1,11 @@
 # Explicit checks are necessary: IDF's default check accepts an image fitting ANY app slot.
-if(NOT CONFIG_ESPTOOLPY_FLASHSIZE_4MB OR NOT CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
-   OR NOT CONFIG_PARTITION_TABLE_CUSTOM OR CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK)
-    message(FATAL_ERROR "Require ESP32 4MB/custom partition/rollback; no eFuse anti-rollback")
+if(NOT CONFIG_ESPTOOLPY_FLASHSIZE_4MB OR NOT CONFIG_PARTITION_TABLE_CUSTOM)
+    message(FATAL_ERROR "Require ESP32 4MB and the custom single-app partition table")
 endif()
 get_filename_component(sc_expected_csv "${CMAKE_CURRENT_LIST_DIR}/../partitions.csv" REALPATH)
 get_filename_component(sc_actual_csv "${CONFIG_PARTITION_TABLE_CUSTOM_FILENAME}" REALPATH BASE_DIR "${PROJECT_DIR}")
 if(NOT sc_actual_csv STREQUAL sc_expected_csv)
-    message(FATAL_ERROR "Both applications must use the shared firmware/partitions.csv")
+    message(FATAL_ERROR "SmartCharge must use firmware 1.0/partitions.csv")
 endif()
 idf_build_get_property(sc_python PYTHON)
 idf_build_get_property(sc_build BUILD_DIR)

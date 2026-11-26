@@ -27,7 +27,7 @@ static bool number_field(const cJSON *json,const char *key,uint32_t max,uint32_t
 
 bool sc_parse_signed_order(const char *json,time_t now,sc_signed_order_t *out)
 {
-    if(!sc_ota_enabled() || now<=1735689600) return false;
+    if(!sc_command_auth_ready() || now<=1735689600) return false;
     /* cJSON strings are NUL-terminated. Reject escaped fields so their signed
      * interpretation is identical to the wire format, including embedded NUL. */
     if(strchr(json,'\\')) return false;

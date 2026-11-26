@@ -2,8 +2,6 @@
   "device": "ESP32_001",
   "ssid": "",
   "password": "",
-  "broker": "",
-  "mqtt_user": "",
-  "mqtt_password": "",
-  "trust_base": ""
+  "setup_password": "",
+  "key_hex": ""
 }

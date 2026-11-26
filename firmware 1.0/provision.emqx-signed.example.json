@@ -1,8 +1,0 @@
-{
-  "MQTT_PUBLIC_SIGNED_MODE": true,
-  "device": "ESP32_001",
-  "ssid": "",
-  "password": "",
-  "broker": "mqtts://broker.emqx.io:8883",
-  "trust_base": "https://capillary-sled-monogamy.ngrok-free.dev/"
-}

@@ -268,3 +268,10 @@ void display_set_wifi_connected(bool connected)
     charge_test_screen_set_wifi(connected);
     _lock_release(&lvgl_api_lock);
 }
+
+void display_show_wifi_setup(const char *ssid,const char *setup_password)
+{
+    _lock_acquire(&lvgl_api_lock);
+    charge_test_screen_set_setup(ssid,setup_password);
+    _lock_release(&lvgl_api_lock);
+}

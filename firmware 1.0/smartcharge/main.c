@@ -3,6 +3,8 @@
 #include "wifi_mqtt.h"
 #include "sc_core.h"
 #include "signed_order.h"
+#include "sc_storage.h"
+#include "sc_provisioning.h"
 #include "sdkconfig.h"
 #include <time.h>
 #include <stdio.h>
@@ -13,7 +15,6 @@
 #include "soc/gpio_reg.h"
 #include "esp_timer.h"
 #include "esp_task_wdt.h"
-#include "esp_ota_ops.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -24,15 +25,13 @@
  * Old comment said 130 Wh; business owner must confirm before changing it. */
 #define WH_PER_10000_VND 0.9f
 static double energy_Wh, energy_target_Wh, lifetime_wh;
-static bool charging_enable, ota_locked, healthy, sample_valid;
+static bool charging_enable, healthy, sample_valid;
 static int64_t energy_time_us, boot_started_us, charge_deadline_us;
 static uint32_t charge_network_epoch;
 static float previous_power;
 static bool have_previous_power;
 static unsigned good_samples;
 static bool done_pending;
-static bool boot_candidate;
-static esp_timer_handle_t health_deadline;
 typedef struct { power_meter_t meter; double total, accumulated; bool charging, valid; } snapshot_t;
 static snapshot_t snapshot;
 static portMUX_TYPE snapshot_lock=portMUX_INITIALIZER_UNLOCKED;
@@ -42,15 +41,9 @@ void IRAM_ATTR esp_task_wdt_isr_user_handler(void)
 {
     REG_WRITE(GPIO_OUT_W1TC_REG,1U << CHARGE_RELAY_GPIO);
 }
-static void health_timeout(void *arg)
-{
-    /* PENDING_VERIFY is rejected by the standard rollback bootloader next boot. */
-    sc_relay_off();
-    esp_restart();
-}
 static void relay_set(bool on)
 {
-    on=on && !sc_config.mqtt_public_test_mode;
+    on=on && sc_command_auth_ready() && !provisioning_active();
     ESP_ERROR_CHECK(gpio_set_level(CHARGE_RELAY_GPIO,on?1:0));
     sc_log("INFO",on?"RELAY_ON":"RELAY_OFF",on?"Charging relay ON":"Charging relay OFF");
 }
@@ -66,7 +59,7 @@ static void payment_rejected(void)
 static void handle_payment(const char *msg,uint32_t epoch)
 {
     sc_signed_order_t order;
-    if(charging_enable || done_pending || ota_locked || !healthy || !sample_valid ||
+    if(charging_enable || done_pending || !healthy || !sample_valid ||
        !sc_network_ready() || !sc_parse_signed_order(msg,time(NULL),&order)) {
         payment_rejected(); return;
     }
@@ -104,17 +97,6 @@ static void check_charge_failsafe(void)
 void update_energy(power_meter_t *m)
 {
     int64_t now=esp_timer_get_time();
-    if(sc_config.mqtt_public_test_mode) {
-        /* Bench measurements use elapsed time between valid ADC windows. */
-        if(have_previous_power) {
-            double delta=(previous_power+m->P)*0.5*(now-energy_time_us)/3600000000.0;
-            if(delta>=0 && isfinite(delta)) lifetime_wh+=delta;
-        }
-        energy_time_us=now;
-        previous_power=m->P;
-        have_previous_power=true;
-        return;
-    }
     if(!charging_enable) { energy_time_us=now; return; }
     double dt=(now-energy_time_us)/1000000.0;
     /* Integrate measured real power using elapsed monotonic time; no 1s assumption.
@@ -160,88 +142,24 @@ static void telemetry_task(void *arg)
         sc_memory_log();
     }
 }
-static void ota_command(const char *json)
-{
-    sc_request_t r;
-    esp_err_t e=sc_parse_request(json,&r);
-    if(e!=ESP_OK) { sc_log("WARN","OTA_REJECTED","Invalid, unauthorized or disabled OTA command"); return; }
-    /* QoS1 duplicates must not turn an already accepted backend job into FAILED/BUSY. */
-    e=sc_check_request(&r);
-    if(e!=ESP_OK) { sc_log("WARN","OTA_REJECTED","Replay, duplicate or incompatible version ignored"); return; }
-    if(charging_enable || gpio_get_level(CHARGE_RELAY_GPIO) || ota_locked || !healthy) {
-        sc_status(&r,"REJECTED_BUSY",0);
-        sc_log("WARN","OTA_REJECTED","Charging or startup active"); return;
-    }
-    e=sc_accept_request(&r);
-    if(e!=ESP_OK) {
-        sc_status(&r,"FAILED",0); sc_log("WARN","OTA_REJECTED","Replay, version or storage check failed"); return;
-    }
-    ota_locked=true; relay_set(false);
-    sc_status(&r,"ACCEPTED",0); sc_log("INFO","OTA_ACCEPTED","OTA request persisted");
-    sc_wait_outbox(2000);
-    e=sc_go_recovery();
-    if(e==ESP_OK) { sc_status(&r,"REBOOTING",0); sc_wait_outbox(1000); esp_restart(); }
-    sc_status(&r,"FAILED",0); sc_log("ERROR","OTA_FAILED","Recovery selection failed; relay remains OFF");
-    /* Keep payments locked: pending request must be resolved by operator/reset. */
-}
 static void confirm_startup(void)
 {
     if(healthy || good_samples<5 || esp_timer_get_time()-boot_started_us<30000000LL ||
-       (boot_candidate && !sc_config.mqtt_public_test_mode && !sc_network_ready()) || !display_is_healthy()) return;
-    ESP_ERROR_CHECK(sc_confirm_healthy());
+       !display_is_healthy()) return;
     healthy=true;
-    ESP_ERROR_CHECK(esp_timer_stop(health_deadline));
     sc_log("INFO","HEALTHY","Application startup health checks passed");
-}
-static void report_version(void)
-{
-    static int64_t last;
-    if(sc_config.mqtt_public_test_mode || !healthy || !sc_network_ready() || esp_timer_get_time()-last<10000000LL) return;
-    sc_request_t r; char state[24]={0};
-    if(sc_load_request(&r)==ESP_OK && sc_get_state(state,sizeof(state))==ESP_OK &&
-       (!strcmp(state,"candidate") || !strcmp(state,"success"))) {
-        if(!strcmp(r.version,esp_app_get_description()->version)) {
-            if(!strcmp(state,"candidate")) {
-                ESP_ERROR_CHECK(sc_set_state("success"));
-                sc_log("INFO","OTA_SUCCESS","New firmware booted and passed health checks");
-            }
-            sc_status(&r,"SUCCESS",100);
-        }
-    }
-    last=esp_timer_get_time();
 }
 void app_main(void)
 {
     /* Configure OFF before LVGL, NVS, ADC or any network initialization. */
     sc_relay_off();
+    ESP_ERROR_CHECK(storage_init());
     ESP_ERROR_CHECK(sc_init());
-    ESP_ERROR_CHECK(sc_boot_guard());
-    esp_ota_img_states_t initial_state;
-    const esp_partition_t *running=esp_ota_get_running_partition();
-    boot_candidate=running && esp_ota_get_state_partition(running,&initial_state)==ESP_OK &&
-                   initial_state==ESP_OTA_IMG_PENDING_VERIFY;
 #ifdef CONFIG_HEADLESS_TEST_MODE
-    char headless_state[24]={0};
-    if(!sc_config.mqtt_public_test_mode ||
-       sc_get_state(headless_state,sizeof(headless_state))!=ESP_OK ||
-       strcmp(headless_state,"bootstrapped")) {
-        ESP_LOGE("BOOT","Headless requires physical public-test bootstrap");
-        if(boot_candidate) esp_ota_mark_app_invalid_rollback_and_reboot();
-        return;
-    }
-    esp_err_t confirm=sc_confirm_healthy();
-    if(confirm!=ESP_OK) {
-        ESP_LOGE("BOOT","Headless bootstrap failed: %s",esp_err_to_name(confirm));
-        if(boot_candidate) esp_ota_mark_app_invalid_rollback_and_reboot();
-        return;
-    }
     sc_network_start_headless();
-    sc_log("INFO","HEALTHY","Headless public-test application running");
+    sc_log("INFO","HEALTHY","Headless application running with relay disabled");
     return;
 #endif
-    const esp_timer_create_args_t guard={.callback=health_timeout,.name="boot_health"};
-    ESP_ERROR_CHECK(esp_timer_create(&guard,&health_deadline));
-    ESP_ERROR_CHECK(esp_timer_start_once(health_deadline,90000000LL));
     ESP_ERROR_CHECK(display_lvgl_init());
     ESP_ERROR_CHECK(power_meter_init());
     wifi_init_sta();
@@ -259,7 +177,7 @@ void app_main(void)
         if(!sample_valid) {
             if(charging_enable) stop_charge("Sensor invalid; relay OFF");
             good_samples=0;
-            if(sc_config.mqtt_public_test_mode) have_previous_power=false;
+            have_previous_power=false;
             static int64_t next_sensor_log;
             int64_t now=esp_timer_get_time();
             if(now>=next_sensor_log) {
@@ -272,15 +190,14 @@ void app_main(void)
             display_update_power(meter.Irms,meter.Vrms,meter.P);
         }
         sc_set_health(sample_valid,display_is_healthy());
-        confirm_startup(); report_version(); publish_done();
+        confirm_startup(); publish_done();
         sc_command_t command;
         /* Bound work per measurement iteration; all session/relay state has one owner. */
         if(sc_receive(&command)) {
-            if(command.ota) ota_command(command.data);
-            else handle_payment(command.data,command.network_epoch);
+            handle_payment(command.data,command.network_epoch);
         }
         portENTER_CRITICAL(&snapshot_lock);
-        snapshot=(snapshot_t){.meter=meter,.total=sc_config.mqtt_public_test_mode?lifetime_wh:energy_Wh,
+        snapshot=(snapshot_t){.meter=meter,.total=energy_Wh,
                               .accumulated=lifetime_wh,
                               .charging=charging_enable,.valid=sample_valid};
         portEXIT_CRITICAL(&snapshot_lock);
