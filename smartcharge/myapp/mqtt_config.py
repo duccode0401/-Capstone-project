@@ -3,6 +3,7 @@ import ssl
 from time import monotonic
 
 import paho.mqtt.client as mqtt
+import certifi
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -47,7 +48,7 @@ def mqtt_connection(*, subscribe_only=False):
     if not re.fullmatch(r"[A-Za-z0-9.-]+", host) or not 1 <= settings.MQTT_PORT <= 65535:
         raise ValidationError("Configure a valid MQTT_BROKER and MQTT_PORT.")
     try:
-        tls = ssl.create_default_context(cafile=settings.MQTT_CA_FILE or None)
+        tls = ssl.create_default_context(cafile=settings.MQTT_CA_FILE or certifi.where())
     except (OSError, ValueError) as exc:
         raise ValidationError("MQTT_CA_FILE cannot be loaded. Check the CA path and PEM format.") from exc
 
