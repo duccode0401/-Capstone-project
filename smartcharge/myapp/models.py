@@ -121,6 +121,7 @@ class PaymentOrder(models.Model):
 
 
 class FirmwareArtifact(models.Model):
+    """Legacy OTA archive; retained only to preserve existing database history."""
     TYPE_MAIN = "main"
     TYPE_RECOVERY = "recovery"
     TYPE_CHOICES = [
@@ -189,6 +190,7 @@ class FirmwareArtifact(models.Model):
 
 
 class OTAJob(models.Model):
+    """Legacy OTA archive; Web and MQTT mutation paths are intentionally removed."""
     STATUS_PENDING = "PENDING"
     STATUS_ACCEPTED = "ACCEPTED"
     STATUS_REJECTED_BUSY = "REJECTED_BUSY"
@@ -275,6 +277,7 @@ class OTAJob(models.Model):
 
 
 class OTAProgressEvent(models.Model):
+    """Legacy OTA event archive; no new events are accepted by the Web backend."""
     job = models.ForeignKey(OTAJob, on_delete=models.CASCADE, related_name="progress_events")
     status = models.CharField(max_length=20, choices=OTAJob.STATUS_CHOICES)
     progress = models.PositiveSmallIntegerField()

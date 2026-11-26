@@ -9,7 +9,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from .models import ChargerDevice, ChargingSession, DeviceLog, DeviceTelemetry
-from .ota_services import DEVICE_ID_PATTERN, version_parts
+from .device_identity import DEVICE_ID_PATTERN, version_parts
 
 
 ALLOWED_TELEMETRY_STATUSES = {"IDLE", "CHARGING", "DONE"}

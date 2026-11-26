@@ -19,7 +19,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from . import views
-from .models import ChargerPort, ChargingSession, OTAJob, PaymentOrder
+from .models import ChargerPort, ChargingSession, PaymentOrder
 from .mqtt_config import mqtt_connection
 
 AMOUNTS = (10000, 20000, 30000, 40000)
@@ -135,13 +135,10 @@ def dispatch_paid_orders():
         device_id=OuterRef("paymentorder__port__device_id"), port_no=OuterRef("paymentorder__port__port_no"),
         status__in=views.ACTIVE_STATUSES,
     ).exclude(pk=OuterRef("pk"))
-    active_ota = OTAJob.objects.filter(device_id=OuterRef("paymentorder__port__device_id")).exclude(
-        status__in=OTAJob.TERMINAL_STATUSES,
-    )
     sessions = ChargingSession.objects.filter(
         paymentorder__isnull=False, status__in=("paid", "waiting", "assigned"),
         mqtt_start_sent_at__isnull=True, paymentorder__port__is_active=True,
-    ).filter(~Exists(busy_port), ~Exists(active_ota)).order_by("created_at", "pk")
+    ).filter(~Exists(busy_port)).order_by("created_at", "pk")
     for session in sessions[:20]:
         try:
             assigned = views.assign_session_to_free_slot(session)

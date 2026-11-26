@@ -9,24 +9,24 @@ from myapp.mqtt_health import roundtrip
 
 
 class Command(BaseCommand):
-    help = "Verify private MQTT TLS, authentication, QoS 1 loopback, and optional keepalive."
+    help = "Verify configured MQTT TLS, QoS 1 round trip, and optional keepalive."
 
     def add_arguments(self, parser):
         parser.add_argument("--ping", action="store_true")
         parser.add_argument("--check-rejections", action="store_true")
 
     def handle(self, *args, **options):
-        if settings.MQTT_PUBLIC_TEST_MODE:
-            raise CommandError("MQTT health requires the private broker configuration.")
         try:
-            config = mqtt_connection()
-            roundtrip(config, verify_ping=options["ping"])
+            config = mqtt_connection(subscribe_only=True)
+            prefix = (f"iot/charge_station/test/{settings.MQTT_PUBLIC_TEST_DEVICE}/health"
+                      if settings.MQTT_PUBLIC_TEST_MODE else "smartcharge/health")
+            roundtrip(config, topic_prefix=prefix, verify_ping=options["ping"])
             self.stdout.write(self.style.SUCCESS(
                 f"{config['hostname']}:{config['port']} TLS, CONNACK, SUBACK and QoS 1 round trip OK."
             ))
             if options["ping"]:
                 self.stdout.write(self.style.SUCCESS("PINGREQ/PINGRESP OK."))
-            if options["check_rejections"]:
+            if options["check_rejections"] and config["auth"]:
                 wrong = {**config["auth"], "password": uuid4().hex}
                 roundtrip({**config, "auth": wrong}, expect_rejection=True)
                 roundtrip({**config, "auth": None}, expect_rejection=True)

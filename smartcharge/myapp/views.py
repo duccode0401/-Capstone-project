@@ -3,7 +3,6 @@ import logging
 import requests
 import os
 import time
-import re
 from datetime import timedelta
 from dotenv import load_dotenv
 from django.conf import settings
@@ -12,7 +11,7 @@ load_dotenv(settings.BASE_DIR / ".env")
 
 from datetime import timedelta
 
-from django.http import FileResponse, Http404, JsonResponse, StreamingHttpResponse
+from django.http import JsonResponse
 from django.shortcuts import redirect, render
 from django.core.exceptions import PermissionDenied
 from django.core.paginator import Paginator
@@ -33,10 +32,8 @@ from .models import (
     DeviceLog,
     DeviceTelemetry,
     MqttAttempt,
-    OTAJob,
     PaymentOrder,
 )
-from .ota_services import authorize_job_token, build_manifest
 from .mqtt_config import mqtt_connection, publish_once
 
 # ====================== MQTT CONFIG ======================
@@ -115,9 +112,6 @@ def assign_session_to_free_slot(session: ChargingSession):
             ChargerPort.objects
             .select_for_update()
             .filter(is_active=True)
-            .exclude(device_id__in=OTAJob.objects.exclude(
-                status__in=OTAJob.TERMINAL_STATUSES
-            ).values("device_id"))
             .order_by("device__device_id", "port_no")
         )
 
@@ -125,10 +119,7 @@ def assign_session_to_free_slot(session: ChargingSession):
         if selected_port.exists():
             ports = ports.filter(pk__in=selected_port)
         for port in ports:
-            # OTA preparation takes the same device lock before assessing idle state.
             device = ChargerDevice.objects.select_for_update().get(pk=port.device_id)
-            if OTAJob.objects.filter(device=device).exclude(status__in=OTAJob.TERMINAL_STATUSES).exists():
-                continue
             has_active = ChargingSession.objects.filter(
                 device=device,
                 port_no=port.port_no,
@@ -447,12 +438,11 @@ def devices_dashboard(request):
     return render(request, "myapp/device_dashboard.html", {"devices": devices})
 
 
-LOG_CATEGORIES = ("BOOT", "WIFI", "MQTT", "HEARTBEAT", "TELEMETRY", "ACK", "ERROR", "OTA")
+LOG_CATEGORIES = ("BOOT", "WIFI", "MQTT", "HEARTBEAT", "TELEMETRY", "ACK", "ERROR")
 LOG_EVENT_PREFIXES = {
     "BOOT": ("BOOT", "HEALTHY", "REBOOT", "WATCHDOG"),
     "WIFI": ("WIFI",),
     "MQTT": ("MQTT",),
-    "OTA": ("OTA", "RECOVER"),
 }
 
 
@@ -476,7 +466,7 @@ def device_logs_dashboard(request):
     if selected_device:
         attempts = attempts.filter(device_id=selected_device)
         events = events.filter(device__device_id=selected_device)
-    if kind in {"heartbeat", "telemetry", "logs", "status", "ota"}:
+    if kind in {"heartbeat", "telemetry", "logs", "status"}:
         attempts = attempts.filter(message_type=kind)
         if kind != "logs":
             events = events.none()
@@ -488,8 +478,6 @@ def device_logs_dashboard(request):
     prefixes = LOG_EVENT_PREFIXES.get(category)
     if prefixes:
         attempt_filter = _event_prefixes("payload__event", prefixes)
-        if category == "OTA":
-            attempt_filter |= Q(message_type="ota")
         attempts = attempts.filter(attempt_filter)
         events = events.filter(_event_prefixes("event", prefixes))
     elif category in {"HEARTBEAT", "TELEMETRY"}:
@@ -528,8 +516,6 @@ def device_logs_dashboard(request):
         level = request.GET.get("filter", "").upper()
         if level in {"INFO", "WARNING", "ERROR"}:
             events = events.filter(level=level)
-        elif level == "OTA":
-            events = events.filter(_event_prefixes("event", LOG_EVENT_PREFIXES["OTA"]))
         elif level == "CHARGING":
             events = events.filter(event__in=(
                 "PAYMENT_RECEIVED", "CHARGING_STARTED", "CHARGE_COMPLETED", "RELAY_ON", "RELAY_OFF",
@@ -587,69 +573,3 @@ def recent_logs_api(request):
     return JsonResponse({"logs": logs})
 
 
-@require_GET
-def firmware_manifest(request, request_id, token):
-    job = authorize_job_token(request_id, token)
-    response = JsonResponse(build_manifest(job, token), json_dumps_params={"separators": (",", ":")})
-    response["Content-Length"] = str(len(response.content))
-    response["Cache-Control"] = "private, no-store, no-transform"
-    response["X-Content-Type-Options"] = "nosniff"
-    return response
-
-
-def _range_iterator(file_handle, start, length, block_size=64 * 1024):
-    try:
-        file_handle.seek(start)
-        remaining = length
-        while remaining > 0:
-            chunk = file_handle.read(min(block_size, remaining))
-            if not chunk:
-                break
-            remaining -= len(chunk)
-            yield chunk
-    finally:
-        file_handle.close()
-
-
-@require_GET
-def firmware_download(request, request_id, token):
-    job = authorize_job_token(request_id, token)
-    firmware = job.firmware
-    try:
-        if firmware.file.size != firmware.file_size:
-            raise Http404("Firmware unavailable.")
-        file_handle = firmware.file.open("rb")
-    except FileNotFoundError as exc:
-        raise Http404("Firmware unavailable.") from exc
-    range_header = request.headers.get("Range", "")
-    match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_header)
-    if range_header and not match:
-        file_handle.close()
-        return StreamingHttpResponse(status=416)
-    if match:
-        start = int(match.group(1))
-        end = int(match.group(2)) if match.group(2) else firmware.file_size - 1
-        if start >= firmware.file_size or end < start:
-            file_handle.close()
-            response = StreamingHttpResponse(status=416)
-            response["Content-Range"] = f"bytes */{firmware.file_size}"
-            return response
-        end = min(end, firmware.file_size - 1)
-        length = end - start + 1
-        response = StreamingHttpResponse(
-            _range_iterator(file_handle, start, length),
-            status=206,
-            content_type="application/octet-stream",
-        )
-        response["Content-Range"] = f"bytes {start}-{end}/{firmware.file_size}"
-        response["Content-Length"] = str(length)
-    else:
-        response = FileResponse(file_handle, content_type="application/octet-stream")
-        response["Content-Length"] = str(firmware.file_size)
-    response["Content-Disposition"] = (
-        f'attachment; filename="smartcharge-{firmware.version}.bin"'
-    )
-    response["Accept-Ranges"] = "bytes"
-    response["Cache-Control"] = "private, no-store, no-transform"
-    response["X-Content-Type-Options"] = "nosniff"
-    return response

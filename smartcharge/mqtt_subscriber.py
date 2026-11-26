@@ -21,20 +21,17 @@ from myapp.models import ChargerDevice, ChargingSession
 from myapp.mqtt_config import mqtt_connection, public_test_heartbeat_topic, public_test_topics
 from myapp.mqtt_ingestion import cleanup, ingest, on_publish
 from myapp.sepay import dispatch_paid_orders
-from myapp.ota_services import expire_stale_ota_jobs, process_ota_status
 
 
 MQTT_TOPIC_STATUS = "iot/charge_station/v1/status"
 MQTT_TOPIC_TELEMETRY = "iot/charge_station/v1/telemetry"
 MQTT_TOPIC_LOGS = "iot/charge_station/v1/logs"
-MQTT_TOPIC_OTA_STATUS = "iot/charge_station/v1/ota/status"
 MQTT_TOPIC_HEARTBEAT = "iot/charge_station/v1/heartbeat"
 SUBSCRIPTIONS = [
     (MQTT_TOPIC_HEARTBEAT, 1),
     (MQTT_TOPIC_STATUS, 1),
     (MQTT_TOPIC_TELEMETRY, 1),
     (MQTT_TOPIC_LOGS, 1),
-    (MQTT_TOPIC_OTA_STATUS, 1),
 ]
 PUBLIC_TEST_EVENTS = {
     "BOOT": ("INFO", "Relay OFF; application starting"),
@@ -181,8 +178,6 @@ def _dispatch(topic, data):
         return process_telemetry(data)
     if topic == MQTT_TOPIC_LOGS:
         return process_device_log(data)
-    if topic == MQTT_TOPIC_OTA_STATUS:
-        return process_ota_status(data)
     raise ValidationError("Unexpected MQTT topic.")
 
 
@@ -190,7 +185,7 @@ def on_message(client, userdata, msg):
     if msg.topic not in dict(_subscriptions()) or getattr(msg, "retain", False) is True:
         return
     close_old_connections()
-    kind = "ota" if msg.topic == MQTT_TOPIC_OTA_STATUS else msg.topic.rsplit("/", 1)[-1]
+    kind = msg.topic.rsplit("/", 1)[-1]
     try:
         if len(msg.payload) > MAX_PAYLOAD_BYTES:
             raise ValueError("Oversized message")
@@ -228,14 +223,6 @@ def _timeout_worker():
             time.sleep(30)
             continue
         try:
-            expired = expire_stale_ota_jobs()
-            if expired:
-                logger.warning("Marked %s OTA job(s) failed by timeout", expired)
-        except Exception:
-            logger.exception("OTA timeout worker failed")
-        finally:
-            close_old_connections()
-        try:
             dispatch_paid_orders()
         except (DatabaseError, ValidationError):
             logger.warning("Could not dispatch verified SePay orders.")
@@ -245,7 +232,7 @@ def _timeout_worker():
 
 
 def on_connect_fail(client, userdata):
-    logger.warning("[MQTT] TCP/TLS connection failed. Check broker service, listener and CA.")
+    logger.warning("[MQTT] TCP/TLS connection failed. Check broker hostname, Internet and CA settings.")
 
 
 def start_mqtt_subscriber():

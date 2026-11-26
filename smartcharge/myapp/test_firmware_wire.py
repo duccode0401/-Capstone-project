@@ -156,12 +156,3 @@ class MonitoringLocalizationTests(TestCase):
         self.assertContains(response, "WIFI_CONNECTED")
         self.assertEqual(dict(ChargerDevice.objects.values_list("device_id", "last_heartbeat_at"))[ALIAS], self.instant)
 
-    def test_ota_is_locked_in_public_mode(self):
-        ChargerDevice.objects.create(device_id=ALIAS)
-        url = reverse("myapp:ota_dashboard")
-        response = self.client.get(url)
-        self.assertContains(response, "OTA DISABLED - SECURE PROVISIONING REQUIRED.")
-        self.assertContains(response, "Start OTA</button>")
-        self.assertContains(response, "disabled")
-        self.assertEqual(self.client.post(url, {}).status_code, 403)
-        self.assertEqual(self.client.get(reverse("admin:myapp_otajob_add")).status_code, 403)

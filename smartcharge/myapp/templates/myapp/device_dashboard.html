@@ -9,7 +9,7 @@
 <body><main class="shell">
   <div class="topbar">
     <div><h1>Device Monitoring</h1><p class="muted">Tự cập nhật mỗi 10 giây; dữ liệu cũ sẽ chuyển OFFLINE.</p></div>
-    <nav class="nav"><a href="{% url 'myapp:device_logs_dashboard' %}">Device logs</a><a href="{% url 'myapp:ota_dashboard' %}">OTA</a><a href="{% url 'admin:index' %}">Admin</a></nav>
+    <nav class="nav"><a href="{% url 'myapp:device_logs_dashboard' %}">Device logs</a><a href="{% url 'admin:index' %}">Admin</a></nav>
   </div>
   <section id="device-cards" class="cards">
   {% for d in devices %}

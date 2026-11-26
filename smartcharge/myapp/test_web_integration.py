@@ -10,11 +10,11 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
-from mqtt_subscriber import MQTT_TOPIC_OTA_STATUS, MQTT_TOPIC_STATUS, on_connect, on_message
+from mqtt_subscriber import MQTT_TOPIC_STATUS, on_connect, on_message
 
 from .charging_protocol import signed_start_charging
 from .iot_services import process_telemetry
-from .models import ChargerDevice, ChargerPort, ChargingSession, DeviceTelemetry, OTAJob, PaymentOrder
+from .models import ChargerDevice, ChargerPort, ChargingSession, DeviceTelemetry, PaymentOrder
 from .sepay import dispatch_paid_orders
 
 
@@ -29,7 +29,7 @@ def telemetry(device="ESP32_001", *, charging=False):
 @override_settings(
     MQTT_PUBLIC_TEST_MODE=False, MQTT_BROKER="mqtt.example.test", MQTT_USERNAME="backend",
     MQTT_PASSWORD="test-password", SEPAY_WEBHOOK_API_KEY="test-webhook",
-    SEPAY_ACCOUNT_NUMBER="12345", SEPAY_BANK="TCB", OTA_PUBLIC_HOST="firmware.example.test",
+    SEPAY_ACCOUNT_NUMBER="12345", SEPAY_BANK="TCB",
     ALLOWED_HOSTS=["testserver", "firmware.example.test"],
 )
 class SePayWebhookTests(TestCase):

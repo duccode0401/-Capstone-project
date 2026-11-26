@@ -11,8 +11,7 @@ from django.core.exceptions import ValidationError
 from .device_identity import DEVICE_ID_PATTERN
 
 
-PUBLIC_TEST_HOST = "broker.emqx.io"
-PUBLIC_TEST_PORT = 8883
+PUBLIC_BROKER_HOSTS = ("broker.emqx.io", "broker.hivemq.com")
 
 
 def public_test_topics():
@@ -42,32 +41,31 @@ def ack_topic(device):
 
 
 def mqtt_connection(*, subscribe_only=False):
+    host = settings.MQTT_BROKER.strip()
+    if not re.fullmatch(r"[A-Za-z0-9.-]+", host) or not 1 <= settings.MQTT_PORT <= 65535:
+        raise ValidationError("Configure a valid MQTT_BROKER and MQTT_PORT.")
+    try:
+        tls = ssl.create_default_context(cafile=settings.MQTT_CA_FILE or None)
+    except (OSError, ValueError) as exc:
+        raise ValidationError("MQTT_CA_FILE cannot be loaded. Check the CA path and PEM format.") from exc
+
     if settings.MQTT_PUBLIC_TEST_MODE:
-        if not subscribe_only:
-            raise ValidationError("MQTT publishing is disabled in public test mode.")
         public_test_topics()
         return {
-            "hostname": PUBLIC_TEST_HOST,
-            "port": PUBLIC_TEST_PORT,
-            "auth": None,
-            "tls": ssl.create_default_context(),
+            "hostname": host,
+            "port": settings.MQTT_PORT,
+            "auth": ({"username": settings.MQTT_USERNAME, "password": settings.MQTT_PASSWORD}
+                     if settings.MQTT_USERNAME else None),
+            "tls": tls,
         }
 
-    host = settings.MQTT_BROKER
     normalized_host = host.lower().rstrip(".")
-    public_hosts = ("broker.hivemq.com", PUBLIC_TEST_HOST)
     if (
-        not re.fullmatch(r"[A-Za-z0-9.-]+", host)
-        or any(normalized_host == public or normalized_host.endswith("." + public) for public in public_hosts)
-        or not 1 <= settings.MQTT_PORT <= 65535
+        any(normalized_host == public or normalized_host.endswith("." + public) for public in PUBLIC_BROKER_HOSTS)
         or not settings.MQTT_USERNAME.strip()
         or not settings.MQTT_PASSWORD
     ):
         raise ValidationError("Configure a private MQTT TLS broker and backend credentials.")
-    try:
-        tls = ssl.create_default_context(cafile=settings.MQTT_CA_FILE or None)
-    except (OSError, ValueError) as exc:
-        raise ValidationError("MQTT_CA_FILE cannot be loaded. Check the Root CA path and PEM format.") from exc
     return {
         "hostname": host,
         "port": settings.MQTT_PORT,
@@ -80,7 +78,8 @@ def publish_once(topic, payload, *, qos, retain, hostname, port, auth, tls):
     """Publish once and bound the wait for CONNACK and PUBACK."""
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, reconnect_on_failure=False)
     client.connect_timeout = 5
-    client.username_pw_set(**auth)
+    if auth:
+        client.username_pw_set(**auth)
     client.tls_set_context(tls)
     connection = None
 

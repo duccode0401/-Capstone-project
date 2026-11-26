@@ -5,7 +5,7 @@ from uuid import uuid4
 import paho.mqtt.client as mqtt
 
 
-def roundtrip(config, *, verify_ping=False, expect_rejection=False, credential_check=False):
+def roundtrip(config, *, topic_prefix="smartcharge/health", verify_ping=False, expect_rejection=False, credential_check=False):
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, protocol=mqtt.MQTTv5)
     client.connect_timeout = 5
     if config["auth"]:
@@ -13,7 +13,7 @@ def roundtrip(config, *, verify_ping=False, expect_rejection=False, credential_c
     client.tls_set_context(config["tls"])
 
     nonce = uuid4().hex
-    topic = f"smartcharge/local/health/{nonce}"
+    topic = f"{topic_prefix.rstrip('/')}/{nonce}"
     expected = nonce.encode()
     state = {
         "connack": None, "suback": None, "puback": None, "received": False,

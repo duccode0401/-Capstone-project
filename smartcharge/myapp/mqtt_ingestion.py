@@ -15,16 +15,15 @@ from django.db.models import F
 from django.utils import timezone
 
 from .iot_services import EVENT_PATTERN, _optional_integer
-from .models import ChargerDevice, MqttAttempt, MqttReceipt, OTAJob
+from .models import ChargerDevice, MqttAttempt, MqttReceipt
 from .mqtt_config import ack_topic
-from .device_identity import DEVICE_ID_PATTERN
-from .ota_services import version_parts
+from .device_identity import DEVICE_ID_PATTERN, version_parts
 
 logger = logging.getLogger("smartcharge.mqtt_subscriber")
 MESSAGE_ID = re.compile(r"(?:[a-f0-9]{16}-[a-f0-9]{8}|[a-fA-F0-9]{8}-[a-fA-F0-9]{8})")
 WIRE_TYPES = {
     "telemetry": {"telemetry"}, "logs": {"log", "logs"}, "heartbeat": {"heartbeat"},
-    "status": {"status"}, "ota": {"ota_status"},
+    "status": {"status"},
 }
 HEALTH_INTEGERS = {
     "uptime_ms": (0, 2**63 - 1),
@@ -70,7 +69,7 @@ def sanitized_payload(data):
         if type(data.get(key)) is bool:
             result[key] = data[key]
     for key, allowed in {
-        **HEALTH_ENUMS, "status": {"IDLE", "CHARGING", "DONE", *(key for key, _ in OTAJob.STATUS_CHOICES)},
+        **HEALTH_ENUMS, "status": {"IDLE", "CHARGING", "DONE"},
         "level": {"INFO", "WARN", "WARNING", "ERROR"},
         "message_type": set().union(*WIRE_TYPES.values()),
     }.items():
@@ -174,7 +173,7 @@ def ingest(client, topic, kind, data, dispatch, *, invalid_json=False):
     versioned_kind = kind in WIRE_TYPES
     wire_type = data.get("message_type")
     valid_type = isinstance(wire_type, str) and wire_type in WIRE_TYPES.get(kind, ())
-    ack_type = wire_type if valid_type else {"logs": "log", "ota": "ota_status"}.get(kind, kind)
+    ack_type = wire_type if valid_type else {"logs": "log"}.get(kind, kind)
     can_ack = v2 and versioned_kind and safe_route and valid_id and data.get("message_type") != "ack"
     audit = {
         "received_at": received_at, "device_id": device if valid_device else "",

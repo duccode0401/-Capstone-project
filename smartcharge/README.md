@@ -1,92 +1,46 @@
-# SmartCharge backend
+# SmartCharge Web
 
-Để xem telemetry và log từ ESP32 trên bàn test mà không cần tài khoản MQTT,
-dùng [chế độ EMQX công cộng](../firmware%201.0/PUBLIC_MQTT_TEST.md).
+Django dashboard, payment workflow, device telemetry/log history and a standalone MQTT subscriber. Web OTA, mDNS and the local Mosquitto/CA toolchain have been removed. Existing OTA database tables remain as read-only legacy data so upgrades do not delete history.
 
-[Hướng dẫn chạy Web và subscriber bằng PowerShell](WEB_BUILD_GUIDE.md)
+## MQTT modes
 
-## Khởi động
+`MQTT_PUBLIC_TEST_MODE=true` is the safe development default. It uses TLS with the operating system's public CA store and the device-specific topics:
 
-Tạo môi trường và cài dependency (chỉ cần làm lần đầu):
+```text
+iot/charge_station/test/<SC_TEST_alias>/telemetry
+iot/charge_station/test/<SC_TEST_alias>/logs
+iot/charge_station/test/<SC_TEST_alias>/heartbeat
+iot/charge_station/test/<SC_TEST_alias>/ack
+```
+
+Public mode accepts only idle telemetry, allow-listed device logs and heartbeat data. It cannot create payment orders, mark charging complete, publish relay commands or start a charging session. Never use an anonymous public broker for real charging operations.
+
+For an operational deployment set `MQTT_PUBLIC_TEST_MODE=false`, use a private TLS broker and unique backend credentials. The backend deliberately rejects known public brokers in this mode. Current firmware-compatible operational topics remain `iot/charge_station/v1/telemetry`, `logs`, `heartbeat`, `status`, device ACK and orders topics.
+
+Copy `.env.example` to `.env` and set the broker through `MQTT_BROKER`, `MQTT_PORT`, `MQTT_USERNAME`, `MQTT_PASSWORD` and optional `MQTT_CA_FILE`. Leave `MQTT_CA_FILE` empty for a certificate issued by a public CA. Secrets and databases must not be committed.
+
+## Run on Windows
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 Copy-Item .env.example .env
-python manage.py migrate
+# Set MQTT_PUBLIC_TEST_DEVICE in .env to the provisioned SC_TEST_<16 hex> alias.
+.\scripts\Start-SmartCharge.ps1
 ```
 
-Điền `DJANGO_SECRET_KEY` và `SEPAY_API_TOKEN` thật vào `.env`. Sau đó mở hai
-PowerShell riêng:
+The launcher performs Django checks, verifies migrations, collects static files, performs a harmless MQTT TLS/QoS 1 round trip, and starts exactly one Django process plus one subscriber. It binds to `0.0.0.0:8000` by default and prints current private-LAN URLs; use `-LoopbackOnly` to bind only to `127.0.0.1`. Django dynamically refreshes allowed private IPv4 hosts, so no Wi-Fi IP is hard-coded.
 
-```powershell
-# Cửa sổ 1: Django
-.\.venv\Scripts\Activate.ps1
-python manage.py runserver
-```
+For Ngrok add its hostname to `DJANGO_EXTRA_HOSTS` and its full HTTPS origin to `DJANGO_CSRF_TRUSTED_ORIGINS`. Example: `DJANGO_EXTRA_HOSTS=example.ngrok-free.app` and `DJANGO_CSRF_TRUSTED_ORIGINS=https://example.ngrok-free.app`.
 
-```powershell
-# Cửa sổ 2: đúng một MQTT subscriber
-.\.venv\Scripts\Activate.ps1
-python mqtt_subscriber.py
-```
-
-MQTT subscriber là process độc lập, không tự chạy cùng `runserver`. Không mở
-nhiều subscriber vì broker có thể giao cùng một status message cho từng process.
-Subscriber dùng TLS tới `broker.hivemq.com:8883` và subscribe
-`iot/charge_station/v1/status`.
-
-## Kiểm tra bản tin DONE từ ESP32
-
-Firmware giữ nguyên payload:
-
-```json
-{"device":"ESP32_001","port":1,"status":"DONE"}
-```
-
-Publish payload trên vào topic `iot/charge_station/v1/status`. Log subscriber
-phải hiện session được chuyển sang `done`. Có thể xác nhận trong Django shell:
-
-```powershell
-python manage.py shell -c "from myapp.models import ChargingSession; print(list(ChargingSession.objects.values('id','status','device__device_id','port_no').order_by('-id')[:10]))"
-```
-
-Payload DONE hiện không có `session_id`. Backend chỉ có thể chọn session hoạt
-động mới nhất của đúng device/port; nó không thể phân biệt tuyệt đối một message
-cũ bị gửi trễ sau khi cổng đã được gán cho phiên kế tiếp.
-
-## Kiểm tra backend
+## Checks
 
 ```powershell
 python manage.py check
 python manage.py makemigrations --check --dry-run
 python manage.py test
+python manage.py collectstatic --noinput
+python manage.py mqtt_health --ping
 ```
 
-## Chạy Web và Mosquitto local trên Windows
-
-Từ thư mục Web, dùng môi trường Python hiện có. Script cấu hình broker dùng hai tài khoản đã tạo cùng CA và chứng chỉ hiện có trong thư mục C:\SmartChargeMQTT. Script sao lưu ACL và cấu hình trước khi cập nhật. Listener TLS dùng loopback, còn Web có thể mở trên LAN. ESP32 trên thiết bị khác cần cấu hình kết nối riêng nếu muốn truy cập broker qua mạng.
-
-```powershell
-if (!(Test-Path '.\.venv\Scripts\python.exe')) { python -m venv .venv }
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-if (!(Test-Path .env)) { Copy-Item .env.example .env }
-```
-
-Mở PowerShell với quyền Administrator để cấu hình Windows Service. Điền mật khẩu tài khoản backend trong PowerShell thường. Lệnh chỉ ghi vào .env cục bộ sau khi xác minh kết nối.
-
-```powershell
-.\scripts\Configure-LocalMosquitto.ps1 -AllowWebLan
-```
-
-```powershell
-.\.venv\Scripts\python.exe -m scripts.set_local_mqtt
-.\.venv\Scripts\python.exe manage.py migrate
-.\.venv\Scripts\python.exe manage.py mqtt_health --ping --check-rejections
-.\scripts\Start-SmartCharge.ps1
-```
-
-Launcher chạy collectstatic, kiểm tra Mosquitto và xác minh Web phục vụ static qua WhiteNoise. Địa chỉ localhost là http://127.0.0.1:8000/. Launcher in thêm địa chỉ LAN đang dùng. Django cập nhật các IP riêng trên giao diện đang hoạt động khi nhận request, giữ localhost và hostname Ngrok từ cấu hình hiện có. Dùng cùng origin khi đăng nhập. Tùy chọn -AllowWebLan tạo quy tắc Firewall TCP 8000 giới hạn vào Python của Web và subnet cục bộ. Dùng tùy chọn -LoopbackOnly nếu chỉ làm việc trên laptop.
-
-Kiểm tra log Web và subscriber trong thư mục .run. Probe MQTT trao đổi trên smartcharge/local/health/ với ID ngẫu nhiên. Đường dẫn CA có thể chỉnh bằng MQTT_CA_FILE cho cấu hình TLS riêng khác. Thông tin thanh toán, cấu hình HMAC và URL OTA vẫn được quản lý độc lập.
+WhiteNoise serves collected CSS/JavaScript when `DEBUG=false`. Subscriber reconnect delay is exponential from 1 to 30 seconds. MQTT audit payloads retain only validated measurements/status fields and redact free-form messages.
