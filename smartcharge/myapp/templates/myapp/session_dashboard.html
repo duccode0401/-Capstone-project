@@ -23,7 +23,7 @@
         <td>{{ s.port_no }}</td>
         <td>{{ s.amount_vnd }}</td>
         <td>{{ s.status }}</td>
-        <td>{{ s.created_at }}</td>
+        <td>{{ s.created_at|date:"d/m/Y H:i:s" }}</td>
       </tr>
       {% empty %}
       <tr>

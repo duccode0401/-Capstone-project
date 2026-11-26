@@ -2,14 +2,61 @@
 <!doctype html>
 <html lang="vi"><head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>SmartCharge Device Logs</title><link rel="stylesheet" href="{% static 'css/monitoring.css' %}">
+  <title>Nhật ký thiết bị · SmartCharge</title>
+  <link rel="stylesheet" href="{% static 'css/monitoring.css' %}">
+  <script src="{% static 'js/monitoring-refresh.js' %}" defer></script>
 </head><body><main class="shell">
-  <div class="topbar"><div><h1>ESP32 Logs</h1><p class="muted">Log mới nhất từ MQTT, phân trang 50 dòng.</p></div><nav class="nav"><a href="{% url 'myapp:devices_dashboard' %}">Monitoring</a><a href="{% url 'admin:index' %}">Admin</a></nav></div>
-  <form class="filters" method="get">
-    <select name="device"><option value="">Tất cả thiết bị</option>{% for d in devices %}<option value="{{ d.device_id }}" {% if selected_device == d.device_id %}selected{% endif %}>{{ d.device_id }}</option>{% endfor %}</select>
-    {% for f in filters %}<a class="{% if selected_filter == f %}active{% endif %}" href="?device={{ selected_device|urlencode }}&filter={{ f }}">{{ f }}</a>{% endfor %}
+  <div class="topbar"><h1>Nhật ký thiết bị</h1><nav class="nav">
+    <a href="{% url 'myapp:devices_dashboard' %}">Thiết bị</a>
+    <a href="{% url 'admin:index' %}">Admin</a>
+  </nav></div>
+  <nav class="tabs" aria-label="Nguồn nhật ký">
+    <a href="?{{ query }}&amp;view=mqtt"{% if not legacy %} aria-current="page"{% endif %}>MQTT</a>
+    <a href="?{{ query }}&amp;view=events"{% if legacy %} aria-current="page"{% endif %}>Sự kiện thiết bị</a>
+  </nav>
+  <form class="filters card" method="get">
+    <input type="hidden" name="view" value="{% if legacy %}events{% else %}mqtt{% endif %}">
+    <label>Thiết bị<select name="device"><option value="">Tất cả</option>{% for d in devices %}<option value="{{ d.device_id }}"{% if selected_device == d.device_id %} selected{% endif %}>{{ d.display_label }}</option>{% endfor %}</select></label>
+    <label>Loại log<select name="category"><option value="">Tất cả</option>{% for option in categories %}<option{% if category == option %} selected{% endif %}>{{ option }}</option>{% endfor %}</select></label>
+    <label>Trạng thái<select name="outcome"><option value="">Tất cả</option>{% for option in outcomes %}<option{% if mqtt_outcome == option %} selected{% endif %}>{{ option }}</option>{% endfor %}</select></label>
+    <label>Từ<input type="datetime-local" name="since" value="{{ since }}" step="1"></label>
+    <label>Đến<input type="datetime-local" name="until" value="{{ until }}" step="1"></label>
+    <button type="submit">Lọc</button>
   </form>
-  <table><thead><tr><th>Time</th><th>Device</th><th>Level</th><th>Event</th><th>Message</th><th>Uptime</th></tr></thead>
-  <tbody>{% for log in page %}<tr><td>{{ log.received_at }}</td><td>{{ log.device.device_id }}</td><td class="level-{{ log.level }}">{{ log.level }}</td><td>{{ log.event }}</td><td>{{ log.message }}</td><td>{{ log.uptime_ms|default_if_none:"—" }}</td></tr>{% empty %}<tr><td colspan="6">Không có log.</td></tr>{% endfor %}</tbody></table>
-  <div class="pagination">{% if page.has_previous %}<a href="?device={{ selected_device|urlencode }}&filter={{ selected_filter }}&page={{ page.previous_page_number }}">← Trước</a>{% endif %}<span>Trang {{ page.number }}/{{ page.paginator.num_pages }}</span>{% if page.has_next %}<a href="?device={{ selected_device|urlencode }}&filter={{ selected_filter }}&page={{ page.next_page_number }}">Sau →</a>{% endif %}</div>
-</main>{% if page.number == 1 %}<script>setTimeout(() => location.reload(), 5000);</script>{% endif %}</body></html>
+  <p class="muted">Giờ Việt Nam (UTC+7). BROKER_CONFIRMED là PUBACK từ broker.</p>
+  {% if page.number == 1 %}<label class="refresh-toggle"><input id="auto-refresh" type="checkbox" checked> Tự cập nhật</label>{% endif %}
+  <div id="monitoring-results">
+  <table class="responsive-table log-table">
+    <thead><tr><th>Thời gian</th><th>Device ID</th><th>Loại</th><th>Message ID</th><th>Tóm tắt</th><th>Xử lý</th><th>ACK</th><th>Latency</th><th>Chi tiết</th></tr></thead>
+    <tbody>
+    {% for row in page %}
+      <tr>
+        <td data-label="Thời gian"><time>{{ row.received_at|date:"d/m/Y H:i:s" }}</time></td>
+        {% if legacy %}
+          <td data-label="Thiết bị">{{ row.device.logical_id }}</td><td data-label="Loại">{{ row.event }}</td>
+          <td data-label="Message ID">—</td><td data-label="Tóm tắt">{{ row.message }}</td>
+          <td data-label="Xử lý">{{ row.level }}</td><td data-label="ACK">—</td><td data-label="Latency">—</td>
+          <td data-label="Chi tiết"><details><summary>Xem</summary><p>Uptime {{ row.uptime_ms|default_if_none:"—" }} ms</p></details></td>
+        {% else %}
+          <td data-label="Thiết bị">{{ row.logical_id|default:"—" }}</td><td data-label="Loại">{{ row.message_type|upper }}</td>
+          <td data-label="Message ID"><code>{{ row.short_message_id|default:"—" }}</code></td>
+          <td data-label="Tóm tắt">{{ row.summary }}</td><td data-label="Xử lý" class="state-{{ row.status }}">{{ row.status }}</td>
+          <td data-label="ACK">{{ row.ack_status }}</td><td data-label="Latency">{{ row.duration_ms }} ms</td>
+          <td data-label="Chi tiết"><details><summary>Xem</summary>
+            <p><code>{{ row.message_id }}</code></p><p>{{ row.topic }}</p>
+            {% if row.ack_published_at %}<p>Publish {{ row.ack_published_at|date:"d/m/Y H:i:s" }}</p>{% endif %}
+            {% if row.ack_confirmed_at %}<p>Phản hồi broker {{ row.ack_confirmed_at|date:"d/m/Y H:i:s" }}</p>{% endif %}
+            <code class="payload">{{ row.display_payload }}</code>
+          </details></td>
+        {% endif %}
+      </tr>
+    {% empty %}<tr><td colspan="9">Không có bản ghi phù hợp.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+  <nav class="pagination" aria-label="Phân trang">
+    {% if page.has_previous %}<a href="?{{ query }}&amp;view={% if legacy %}events{% else %}mqtt{% endif %}&amp;page={{ page.previous_page_number }}">Trước</a>{% endif %}
+    <span>Trang {{ page.number }}/{{ page.paginator.num_pages }}</span>
+    {% if page.has_next %}<a href="?{{ query }}&amp;view={% if legacy %}events{% else %}mqtt{% endif %}&amp;page={{ page.next_page_number }}">Sau</a>{% endif %}
+  </nav>
+  </div>
+</main></body></html>

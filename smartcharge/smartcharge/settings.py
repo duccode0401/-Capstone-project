@@ -12,8 +12,8 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 from pathlib import Path
 import os
-from urllib.parse import urlsplit
 from dotenv import load_dotenv
+from django.core.management.utils import get_random_secret_key
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -24,18 +24,18 @@ load_dotenv(BASE_DIR / ".env")
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "django-insecure-local-development-only")
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY") or get_random_secret_key()
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get("DJANGO_DEBUG", "").strip().lower() == "true"
 
-FIRMWARE_HTTPS_BASE_URL = os.environ.get("FIRMWARE_HTTPS_BASE_URL", "").rstrip("/")
-OTA_PUBLIC_HOST = urlsplit(FIRMWARE_HTTPS_BASE_URL).hostname
 ALLOWED_HOSTS = ["localhost", "127.0.0.1", "[::1]"]
+DJANGO_LAN_MODE = os.environ.get("DJANGO_LAN_MODE", "").strip().lower() == "true"
 CSRF_TRUSTED_ORIGINS = []
-if OTA_PUBLIC_HOST:
-    ALLOWED_HOSTS.append(OTA_PUBLIC_HOST)
-    CSRF_TRUSTED_ORIGINS.append(f"https://{urlsplit(FIRMWARE_HTTPS_BASE_URL).netloc}")
+for host in filter(None, (item.strip() for item in os.environ.get("DJANGO_EXTRA_HOSTS", "").split(","))):
+    ALLOWED_HOSTS.append(host)
+for origin in filter(None, (item.strip() for item in os.environ.get("DJANGO_CSRF_TRUSTED_ORIGINS", "").split(","))):
+    CSRF_TRUSTED_ORIGINS.append(origin)
 
 
 # Application definition
@@ -51,8 +51,9 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
-    'myapp.middleware.FirmwareTunnelMiddleware',
+    'myapp.middleware.LanHostMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -84,8 +85,10 @@ WSGI_APPLICATION = 'smartcharge.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
-MQTT_PUBLIC_TEST_MODE = os.environ.get("MQTT_PUBLIC_TEST_MODE", "").strip().lower() == "true"
+MQTT_PUBLIC_TEST_MODE = os.environ.get("MQTT_PUBLIC_TEST_MODE", "true").strip().lower() == "true"
+MQTT_DEVICE_ID = os.environ.get("MQTT_DEVICE_ID", "ESP32_001").strip()
 MQTT_PUBLIC_TEST_DEVICE = os.environ.get("MQTT_PUBLIC_TEST_DEVICE", "").strip()
+MQTT_PUBLIC_TEST_LOGICAL_DEVICE = os.environ.get("MQTT_PUBLIC_TEST_LOGICAL_DEVICE", MQTT_DEVICE_ID).strip()
 
 DATABASES = {
     'default': {
@@ -117,9 +120,10 @@ AUTH_PASSWORD_VALIDATORS = [
 # Internationalization
 # https://docs.djangoproject.com/en/5.2/topics/i18n/
 
-LANGUAGE_CODE = 'en-us'
+LANGUAGE_CODE = "vi"
+FORMAT_MODULE_PATH = "smartcharge.formats"
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = "Asia/Ho_Chi_Minh"
 
 USE_I18N = True
 
@@ -129,13 +133,13 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
-STATIC_URL = 'static/'
-MEDIA_ROOT = BASE_DIR / "media-private"
-
-# OTA/monitoring
-OTA_DEVICE_KEYS_JSON = os.environ.get("OTA_DEVICE_KEYS_JSON", "{}")
-OTA_DOWNLOAD_TTL_SECONDS = int(os.environ.get("OTA_DOWNLOAD_TTL_SECONDS", "7200"))
-OTA_STATUS_TIMEOUT_SECONDS = int(os.environ.get("OTA_STATUS_TIMEOUT_SECONDS", "900"))
+STATIC_URL = "/static/"
+STATIC_ROOT = BASE_DIR / "static-collected"
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": "whitenoise.storage.CompressedStaticFilesStorage"},
+}
+# Monitoring
 DEVICE_STALE_SECONDS = int(os.environ.get("DEVICE_STALE_SECONDS", "30"))
 TELEMETRY_RETENTION_PER_DEVICE = int(
     os.environ.get("TELEMETRY_RETENTION_PER_DEVICE", "10000")
@@ -144,26 +148,17 @@ DEVICE_LOG_RETENTION_PER_DEVICE = int(
     os.environ.get("DEVICE_LOG_RETENTION_PER_DEVICE", "5000")
 )
 
-MQTT_BROKER = os.environ.get("MQTT_BROKER", "")
+MQTT_BROKER = os.environ.get("MQTT_BROKER", "broker.emqx.io")
 MQTT_PORT = int(os.environ.get("MQTT_PORT", "8883"))
 MQTT_USERNAME = os.environ.get("MQTT_USERNAME", "")
 MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", "")
+MQTT_CA_FILE = os.environ.get("MQTT_CA_FILE", "").strip()
+SEPAY_WEBHOOK_API_KEY = os.environ.get("SEPAY_WEBHOOK_API_KEY", "")
+SEPAY_ACCOUNT_NUMBER = os.environ.get("SEPAY_ACCOUNT_NUMBER", "")
+SEPAY_BANK = os.environ.get("SEPAY_BANK", "")
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# OTA capabilities are bearer tokens embedded in request paths.
-LOGGING = {
-    "version": 1,
-    "disable_existing_loggers": False,
-    "filters": {"hide_firmware_url": {"()": "myapp.middleware.HideFirmwareURL"}},
-    "handlers": {"runserver": {"class": "logging.StreamHandler"}},
-    "loggers": {
-        "django.server": {
-            "handlers": ["runserver"], "filters": ["hide_firmware_url"], "propagate": False,
-        },
-        "django.request": {"filters": ["hide_firmware_url"]},
-    },
-}

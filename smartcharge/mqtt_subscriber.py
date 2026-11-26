@@ -18,37 +18,44 @@ from django.utils import timezone
 
 from myapp.iot_services import process_device_log, process_telemetry
 from myapp.models import ChargerDevice, ChargingSession
-from myapp.mqtt_config import mqtt_connection, public_test_topics
-from myapp.ota_services import expire_stale_ota_jobs, process_ota_status
+from myapp.mqtt_config import mqtt_connection, public_test_heartbeat_topic, public_test_topics
+from myapp.mqtt_ingestion import cleanup, ingest, on_publish
+from myapp.sepay import dispatch_paid_orders
 
 
 MQTT_TOPIC_STATUS = "iot/charge_station/v1/status"
 MQTT_TOPIC_TELEMETRY = "iot/charge_station/v1/telemetry"
 MQTT_TOPIC_LOGS = "iot/charge_station/v1/logs"
-MQTT_TOPIC_OTA_STATUS = "iot/charge_station/v1/ota/status"
+MQTT_TOPIC_HEARTBEAT = "iot/charge_station/v1/heartbeat"
 SUBSCRIPTIONS = [
+    (MQTT_TOPIC_HEARTBEAT, 1),
     (MQTT_TOPIC_STATUS, 1),
-    (MQTT_TOPIC_TELEMETRY, 0),
-    (MQTT_TOPIC_LOGS, 0),
-    (MQTT_TOPIC_OTA_STATUS, 1),
+    (MQTT_TOPIC_TELEMETRY, 1),
+    (MQTT_TOPIC_LOGS, 1),
 ]
 PUBLIC_TEST_EVENTS = {
     "BOOT": ("INFO", "Relay OFF; application starting"),
-    "BOOTSTRAP_FAILED": ("ERROR", "Preloaded application invalid"),
+    "CHARGE_COMPLETED": ("INFO", "Charging completed; relay OFF"),
+    "CHARGING_STARTED": ("INFO", "Charging session started"),
+    "CHARGING_STOPPED": ("WARNING", "Charging stopped; relay OFF"),
     "HEALTHY": ("INFO", "Application startup health checks passed"),
-    "HEAP_LOW": ("WARN", "Internal RAM pressure"),
+    "HEAP_LOW": ("WARNING", "Internal RAM pressure"),
+    "MQTT_ERROR": ("WARNING", "MQTT transport error"),
     "MQTT_CONNECTED": ("INFO", "MQTT session connected"),
-    "MQTT_DISCONNECTED": ("WARN", "MQTT session disconnected"),
+    "MQTT_DISCONNECTED": ("WARNING", "MQTT session disconnected"),
+    "PAYMENT_ACCEPTED": ("INFO", "Authenticated order accepted"),
+    "PAYMENT_REJECTED": ("WARNING", "Order rejected by device"),
     "REBOOT_REASON": ("INFO", "Device restarted"),
-    "RECOVERING": ("WARN", "Recovery running; relay locked OFF"),
     "RELAY_OFF": ("INFO", "Relay OFF"),
+    "RELAY_ON": ("INFO", "Relay ON after authenticated command"),
     "SENSOR_ERROR": ("ERROR", "ADC measurement failed; relay OFF"),
-    "WATCHDOG_RESET": ("WARN", "Watchdog reset"),
+    "WATCHDOG_RESET": ("WARNING", "Watchdog reset"),
     "WIFI_CONNECTED": ("INFO", "Wi-Fi obtained IP address"),
-    "WIFI_DISCONNECTED": ("WARN", "Wi-Fi disconnected; reconnecting"),
+    "WIFI_DISCONNECTED": ("WARNING", "Wi-Fi disconnected; reconnecting"),
 }
 PUBLIC_MEASUREMENTS = (
     "voltage_v", "current_a", "power_w", "energy_total_wh", "energy_delta_wh", "interval_s",
+    "heap_free_bytes", "rssi_dbm",
 )
 ACTIVE_STATUSES = ("assigned", "charging")
 MAX_PAYLOAD_BYTES = 4096
@@ -116,7 +123,7 @@ def mark_session_done(device_id, port_no):
 
 def _subscriptions():
     if settings.MQTT_PUBLIC_TEST_MODE:
-        return [(topic, 0) for topic in public_test_topics()]
+        return [(topic, 1) for topic in (*public_test_topics(), public_test_heartbeat_topic())]
     return SUBSCRIPTIONS
 
 
@@ -127,13 +134,14 @@ def on_connect(client, userdata, connect_flags, reason_code, properties):
     subscriptions = _subscriptions()
     result, message_id = client.subscribe(subscriptions)
     logger.info(
-        "MQTT connected; subscribed=%s result=%s mid=%s",
+        "[MQTT] CONNECTED subscription_request=%s result=%s mid=%s",
         [topic for topic, _ in subscriptions], result, message_id,
     )
 
 
 def on_subscribe(client, userdata, mid, reason_codes, properties):
     denied = [topic for (topic, _), reason in zip(_subscriptions(), reason_codes) if reason.is_failure]
+    logger.info("[MQTT] SUBSCRIBED %s", [topic for topic, _ in _subscriptions() if topic not in denied])
     if denied:
         logger.error("Broker denied subscriptions: %s", ", ".join(denied))
 
@@ -149,6 +157,8 @@ def _dispatch_public_test(topic, data):
         raise ValidationError("Unexpected MQTT test device.")
     if topic == telemetry and data.get("charging") is False and data.get("status") == "IDLE":
         sample = {key: data.get(key) for key in PUBLIC_MEASUREMENTS}
+        if "firmware_version" in data:
+            sample["firmware_version"] = data["firmware_version"]
         return process_telemetry(dict(sample, device=device, port=1, charging=False, status="IDLE"))
     if topic == logs:
         event = data.get("event")
@@ -172,55 +182,61 @@ def _dispatch(topic, data):
         return process_telemetry(data)
     if topic == MQTT_TOPIC_LOGS:
         return process_device_log(data)
-    if topic == MQTT_TOPIC_OTA_STATUS:
-        return process_ota_status(data)
     raise ValidationError("Unexpected MQTT topic.")
 
 
 def on_message(client, userdata, msg):
-    if settings.MQTT_PUBLIC_TEST_MODE and msg.topic not in public_test_topics():
-        return
-    if getattr(msg, "retain", False) is True:
-        logger.warning("Ignoring retained MQTT message on %s", msg.topic)
+    if msg.topic not in dict(_subscriptions()) or getattr(msg, "retain", False) is True:
         return
     close_old_connections()
-    if len(msg.payload) > MAX_PAYLOAD_BYTES:
-        logger.error("MQTT payload too large topic=%s bytes=%s", msg.topic, len(msg.payload))
-        return
+    kind = msg.topic.rsplit("/", 1)[-1]
     try:
-        payload = msg.payload.decode("utf-8")
-    except UnicodeDecodeError:
-        logger.error("MQTT payload is not UTF-8 topic=%s", msg.topic)
-        return
-    logger.info("MQTT received topic=%s bytes=%s", msg.topic, len(msg.payload))
-    try:
-        data = json.loads(payload)
-        result = _dispatch(msg.topic, data)
-        logger.info("MQTT processed topic=%s result=%s", msg.topic, getattr(result, "pk", result))
-    except json.JSONDecodeError:
-        logger.error("Invalid MQTT JSON topic=%s", msg.topic)
-    except ValidationError as exc:
-        logger.warning("Rejected MQTT message topic=%s: %s", msg.topic, "; ".join(exc.messages))
-    except DatabaseError:
-        logger.exception("Database error processing MQTT topic=%s", msg.topic)
-    except Exception:
-        logger.exception("Unexpected error processing MQTT topic=%s", msg.topic)
+        if len(msg.payload) > MAX_PAYLOAD_BYTES:
+            raise ValueError("Oversized message")
+        data = json.loads(msg.payload.decode("utf-8"), object_pairs_hook=_unique_object)
+        if not isinstance(data, dict):
+            raise ValueError("JSON object required")
+    except (ValueError, RecursionError):
+        ingest(client, msg.topic, kind, {}, _dispatch, invalid_json=True)
+    else:
+        if data.get("message_type") != "ack":
+            ingest(client, msg.topic, kind, data, _dispatch)
     finally:
         close_old_connections()
+
+
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON key")
+        result[key] = value
+    return result
 
 
 def _timeout_worker():
     while True:
         try:
             close_old_connections()
-            expired = expire_stale_ota_jobs()
-            if expired:
-                logger.warning("Marked %s OTA job(s) failed by timeout", expired)
-        except Exception:
-            logger.exception("OTA timeout worker failed")
+            cleanup()
+        except DatabaseError:
+            logger.warning("MQTT retention cleanup failed")
+        finally:
+            close_old_connections()
+        if settings.MQTT_PUBLIC_TEST_MODE:
+            time.sleep(30)
+            continue
+        try:
+            dispatch_paid_orders()
+        except (DatabaseError, ValidationError):
+            logger.warning("Could not dispatch verified SePay orders.")
         finally:
             close_old_connections()
         time.sleep(30)
+
+
+def on_connect_fail(client, userdata):
+    logger.warning("[MQTT] TCP/TLS connection failed. Check broker hostname, Internet and CA settings.")
 
 
 def start_mqtt_subscriber():
@@ -236,12 +252,15 @@ def start_mqtt_subscriber():
     client.on_connect = on_connect
     client.on_subscribe = on_subscribe
     client.on_disconnect = on_disconnect
+    client.on_connect_fail = on_connect_fail
     client.on_message = on_message
+    client.on_publish = on_publish
+    client.smartcharge_ack_mids = {}
+    client.max_queued_messages_set(256)
     client.tls_set_context(config["tls"])
     client.reconnect_delay_set(min_delay=1, max_delay=30)
     client.connect_async(config["hostname"], config["port"], keepalive=60)
-    if not test_mode:
-        threading.Thread(target=_timeout_worker, name="ota-timeouts", daemon=True).start()
+    threading.Thread(target=_timeout_worker, name="subscriber-maintenance", daemon=True).start()
     logger.info(
         "Starting one standalone MQTT subscriber %s:%s (never run inside Django workers)",
         config["hostname"], config["port"],
@@ -250,4 +269,16 @@ def start_mqtt_subscriber():
 
 
 if __name__ == "__main__":
-    start_mqtt_subscriber()
+    if os.name == "nt":
+        import msvcrt
+
+        lock_dir = settings.BASE_DIR / ".run"
+        lock_dir.mkdir(exist_ok=True)
+        with (lock_dir / "mqtt-subscriber.lock").open("a+b") as lock:
+            try:
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                raise SystemExit("[MQTT] Subscriber is already running for this installation.") from None
+            start_mqtt_subscriber()
+    else:
+        start_mqtt_subscriber()

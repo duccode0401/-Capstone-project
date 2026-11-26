@@ -13,17 +13,35 @@
   </div>
   <section id="device-cards" class="cards">
   {% for d in devices %}
-    <article class="card" data-device="{{ d.device_id }}">
-      <div class="card-head"><div><strong>{{ d.device_id }}</strong><div class="muted firmware">FW {{ d.firmware_version }}</div></div><span class="badge {% if d.online %}online{% else %}offline{% endif %}">{% if d.online %}ONLINE{% else %}OFFLINE{% endif %}</span></div>
+    <article class="card" data-device="{{ d.routing_id }}">
+      <div class="card-head"><div><strong>{{ d.display_label }}</strong><div class="muted firmware">FW {{ d.firmware_version }}</div></div><span class="badge {% if d.online %}online{% else %}offline{% endif %}">{% if d.online %}ONLINE{% else %}OFFLINE{% endif %}</span></div>
       <div class="metrics">
         <div class="metric"><span>Voltage</span><strong data-key="voltage_v">{{ d.voltage_v|default_if_none:"—" }}</strong> V</div>
         <div class="metric"><span>Current</span><strong data-key="current_a">{{ d.current_a|default_if_none:"—" }}</strong> A</div>
         <div class="metric"><span>Power</span><strong data-key="power_w">{{ d.power_w|default_if_none:"—" }}</strong> W</div>
         <div class="metric"><span>Total energy</span><strong data-key="energy_total_wh">{{ d.energy_total_wh|default_if_none:"—" }}</strong> Wh</div>
         <div class="metric"><span>10s energy</span><strong data-key="energy_delta_wh">{{ d.energy_delta_wh|default_if_none:"—" }}</strong> Wh</div>
+        <div class="metric"><span>Free heap</span><strong data-key="heap_free_bytes">{{ d.heap_free_bytes|default_if_none:"—" }}</strong> B</div>
+        <div class="metric"><span>RSSI</span><strong data-key="rssi_dbm">{{ d.rssi_dbm|default_if_none:"—" }}</strong> dBm</div>
+        <div class="metric"><span>Reported firmware</span><strong data-key="reported_firmware_version">{{ d.reported_firmware_version|default:"—" }}</strong></div>
         <div class="metric"><span>State</span><strong data-key="charging_status">{{ d.charging_status }}</strong></div>
+        <div class="metric"><span>Minimum heap</span><strong data-key="minimum_heap">{{ d.minimum_heap|default_if_none:"—" }}</strong> B</div>
+        <div class="metric"><span>Uptime</span><strong data-key="uptime_ms">{{ d.uptime_ms|default_if_none:"—" }}</strong> ms</div>
+        <div class="metric"><span>Reset reason</span><strong data-key="reset_reason">{{ d.reset_reason|default_if_none:"—" }}</strong></div>
+        <div class="metric"><span>Relay</span><strong data-key="relay_on">{{ d.relay_on|yesno:"ON,OFF,—" }}</strong></div>
+        <div class="metric"><span>Sensor</span><strong data-key="sensor_status">{{ d.sensor_status|default_if_none:"—" }}</strong></div>
+        <div class="metric"><span>Display</span><strong data-key="display_status">{{ d.display_status|default_if_none:"—" }}</strong></div>
+        <div class="metric"><span>Mode</span><strong data-key="mode">{{ d.mode|default_if_none:"—" }}</strong></div>
+        <div class="metric"><span>Tổng RX</span><strong data-key="rx_count">{{ d.rx_count }}</strong></div>
+        <div class="metric"><span>Success</span><strong data-key="success_count">{{ d.success_count|default_if_none:"—" }}</strong></div>
+        <div class="metric"><span>Failed</span><strong data-key="failed_count">{{ d.failed_count|default_if_none:"—" }}</strong></div>
+        <div class="metric"><span>Duplicate</span><strong data-key="duplicate_count">{{ d.duplicate_count|default_if_none:"—" }}</strong></div>
+        <div class="metric"><span>Message ID</span><strong data-key="last_message_id">{{ d.last_message_id|default_if_none:"—" }}</strong></div>
+        <div class="metric"><span>Last error</span><strong data-key="last_error">{{ d.last_error|default_if_none:"—" }}</strong></div>
       </div>
-      <p class="muted">Last seen: <span data-key="last_update">{{ d.last_update|default:"—" }}</span></p>
+      <p class="muted">Last heartbeat <span data-key="last_heartbeat">{{ d.last_heartbeat|date:"d/m/Y H:i:s"|default:"—" }}</span></p>
+      <p class="muted">Last seen: <span data-key="last_update">{{ d.last_update|date:"d/m/Y H:i:s"|default:"—" }}</span></p>
+      <p data-key="peripherals" class="muted"{% if d.mode != "HEADLESS" %} hidden{% endif %}>Ngoại vi chưa kết nối.</p>
     </article>
   {% empty %}<p>Chưa có thiết bị.</p>{% endfor %}
   </section>
@@ -35,16 +53,23 @@ async function refreshDevices() {
     if (!response.ok) return;
     const body = await response.json();
     body.devices.forEach(d => {
-      const card = document.querySelector(`[data-device="${CSS.escape(d.device_id)}"]`);
+      const card = document.querySelector(`[data-device="${CSS.escape(d.routing_id)}"]`);
       if (!card) { location.reload(); return; }
       const badge = card.querySelector('.badge');
       badge.textContent = d.online ? 'ONLINE' : 'OFFLINE';
       badge.className = `badge ${d.online ? 'online' : 'offline'}`;
       card.querySelector('.firmware').textContent = `FW ${d.firmware_version}`;
-      ['voltage_v','current_a','power_w','energy_total_wh','energy_delta_wh','charging_status'].forEach(k => {
-        card.querySelector(`[data-key="${k}"]`).textContent = d[k] ?? '—';
+      card.querySelectorAll('[data-key]').forEach(element => {
+        const key = element.dataset.key;
+        let value = d[key];
+        if (['last_update', 'last_heartbeat'].includes(key)) value = d[key + '_display'];
+        if (key === 'peripherals') {
+          element.hidden = d.mode !== 'HEADLESS';
+          return;
+        }
+        if (key === 'relay_on' && typeof value === 'boolean') value = value ? 'ON' : 'OFF';
+        element.textContent = value === '' ? '—' : (value ?? '—');
       });
-      card.querySelector('[data-key="last_update"]').textContent = d.last_update ? new Date(d.last_update).toLocaleString() : '—';
     });
   } catch (_) {}
 }
