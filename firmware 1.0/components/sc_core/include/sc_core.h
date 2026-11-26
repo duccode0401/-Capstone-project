@@ -24,6 +24,8 @@ typedef struct {
 } sc_request_t;
 typedef struct { uint32_t network_epoch; bool ota; char data[SC_MESSAGE_MAX]; } sc_command_t;
 extern sc_config_t sc_config;
+const char *sc_logical_device(void);
+bool sc_serial_debug(void);
 cJSON *sc_parse_flat_json(const char *text, size_t max_length);
 esp_err_t sc_init(void);
 void sc_relay_off(void);

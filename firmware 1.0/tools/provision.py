@@ -50,6 +50,8 @@ def main():
 
     limits = {"device": 31, "ssid": 32, "password": 64, "broker": 191, "trust_base": 191}
     if test_mode:
+        cfg.setdefault("logical_device", "ESP32_001")
+        limits["logical_device"] = 31
         if not cfg.get("device"):
             cfg["device"] = "SC_TEST_" + secrets.token_hex(8)
         cfg.setdefault("broker", PUBLIC_BROKER)
@@ -62,6 +64,7 @@ def main():
         if any(cfg.get(field) for field in ("mqtt_user", "mqtt_password")):
             raise ValueError("Leave MQTT credentials empty for signed EMQX mode")
     else:
+        cfg.setdefault("device", "ESP32_001")
         limits.update(mqtt_user=63, mqtt_password=127)
     for field, limit in limits.items():
         if field not in cfg or not isinstance(cfg[field], str) or len(cfg[field].encode()) > limit:
@@ -71,7 +74,8 @@ def main():
     if not cfg["ssid"] or not trusted_url(cfg["trust_base"], cfg["trust_base"]):
         raise ValueError("Provision Wi-Fi and an HTTPS trust base")
     if test_mode:
-        if cfg["broker"] != PUBLIC_BROKER or not re.fullmatch(r"SC_TEST_[a-f0-9]{16}", cfg["device"]):
+        if (cfg["broker"] != PUBLIC_BROKER or not re.fullmatch(r"SC_TEST_[a-f0-9]{16}", cfg["device"])
+                or not re.fullmatch(r"[A-Za-z0-9_.-]{1,31}", cfg["logical_device"])):
             raise ValueError("Public test mode requires the EMQX TLS endpoint and a test device alias")
         cfg = {field: cfg[field] for field in limits}
         cfg["MQTT_PUBLIC_TEST_MODE"] = True

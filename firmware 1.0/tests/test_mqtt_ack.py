@@ -35,7 +35,10 @@ class MqttAckTests(unittest.TestCase):
 '''
         wrapper += types + r'''
 static pending_t pending[SC_ACK_SLOTS];
-static unsigned dropped, transport_wait;
+static unsigned dropped, transport_wait,stats_tx,stats_ok,stats_fail,stats_retry;
+static bool sc_serial_debug(void) { return false; }
+static void serial_tx(const pending_t *p) {}
+static void serial_ack(const pending_t *p,const ack_event_t *a,int64_t now) {}
 static char ack_topic[80];
 static int ack_queue, tx_queue, client;
 static unsigned publishes;
@@ -57,6 +60,7 @@ static void reset(void) {
     memset(pending,0,sizeof(pending));
     dropped=0; publishes=0; transport_wait=1; connected=true; enqueue_status=1; outbox_size=0;
     server_v2_seen=false;
+    stats_tx=stats_ok=stats_fail=stats_retry=0;
     pending[0].active=true;
     pending[0].message.wait_for_transport=true;
     pending[0].message.kind="heartbeat";
@@ -122,6 +126,11 @@ int main(void) {
     service_pending(0);
     service_pending(5000000);
     assert(!p->active && publishes==1);
+    reset();
+    p->message.kind="ota";
+    service_pending(0);
+    handle_ack_event(&broker,1000);
+    assert(!p->active && publishes==1 && stats_ok==0);
 
     reset();
     connected=false;
@@ -146,7 +155,8 @@ int main(void) {
             binary = Path(tmp) / ("ack.exe" if os.name == "nt" else "ack")
             test.write_text(wrapper, encoding="ascii")
             subprocess.run([cc, str(test), "-o", str(binary)], check=True, capture_output=True)
-            subprocess.run([str(binary)], check=True, capture_output=True)
+            result = subprocess.run([str(binary)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_wire_envelope_and_ack_validation(self):
         local = ROOT / "build-host/tcc/tcc.exe"
@@ -196,6 +206,8 @@ static char ack_topic[80];
 static bool got_ack;
 static int64_t esp_timer_get_time(void) { return 10000000; }
 static bool sc_network_ready(void) { return true; }
+static bool sc_serial_debug(void) { return false; }
+static const char *sc_logical_device(void) { return "ESP32_001"; }
 static BaseType_t xQueueSend(int q,const void *item,int ticks) {
     if(!allow_queue) return false;
     if(q==tx_queue) memcpy(&sent,item,sizeof(sent));
@@ -223,6 +235,8 @@ int main(void) {
     cJSON *json=sc_parse_flat_json(sent.json,sizeof(sent.json)-1);
     assert(json);
     assert(cJSON_GetObjectItemCaseSensitive(json,"protocol_version")->valueint==2);
+    assert(strlen(sent.id)==17 && sent.id[8]=='-');
+    assert(!strcmp(cJSON_GetObjectItemCaseSensitive(json,"logical_device")->valuestring,"ESP32_001"));
     assert(cJSON_GetObjectItemCaseSensitive(json,"uptime_ms")->valueint==10000);
     assert(cJSON_GetObjectItemCaseSensitive(json,"voltage_v")->valuedouble==1.5);
     cJSON_Delete(json);

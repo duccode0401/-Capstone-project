@@ -1,6 +1,7 @@
 {
   "MQTT_PUBLIC_TEST_MODE": true,
   "device": "",
+  "logical_device": "ESP32_001",
   "ssid": "",
   "password": "",
   "broker": "mqtts://broker.emqx.io:8883",

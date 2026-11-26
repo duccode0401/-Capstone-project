@@ -4,6 +4,8 @@
 #include <stdatomic.h>
 #include <time.h>
 #include <inttypes.h>
+#include <stdlib.h>
+#include "driver/uart.h"
 #include "driver/gpio.h"
 #include "esp_netif_ip_addr.h"
 #include "cJSON.h"
@@ -26,7 +28,7 @@
 #define SC_ACK_TIMEOUT_US 5000000LL
 #define SC_ACK_MAX_ATTEMPTS 4
 #define SC_ACK_LIFETIME_US 90000000LL
-#define SC_ACK_ID_LEN 26
+#define SC_ACK_ID_LEN 18
 
 typedef struct {
     char topic[80], json[768], id[SC_ACK_ID_LEN];
@@ -49,6 +51,10 @@ typedef struct {
 static QueueHandle_t tx_queue,rx_queue,ack_queue;
 static pending_t pending[SC_ACK_SLOTS];
 static uint32_t nonce[2];
+typedef enum { SERIAL_NORMAL, SERIAL_DEBUG, SERIAL_ERROR } serial_mode_t;
+static atomic_uint serial_mode;
+static bool serial_rx_ready;
+static unsigned stats_tx,stats_ok,stats_fail,stats_retry;
 static atomic_uint tx_sequence, transport_wait;
 static atomic_uint health;
 static char ack_topic[80];
@@ -68,6 +74,7 @@ static bool incoming_ota,incoming_valid;
 #define WIFI_LOG_UP BIT2
 #define WIFI_LOG_DOWN BIT3
 
+bool sc_serial_debug(void) { return atomic_load(&serial_mode)==SERIAL_DEBUG; }
 uint32_t sc_dropped_messages(void) { return atomic_load(&dropped); }
 uint32_t sc_network_epoch(void) { return atomic_load(&connection_epoch); }
 bool sc_network_ready(void)
@@ -94,10 +101,10 @@ bool sc_publish(const char *topic,const char *json,bool reliable)
     if(!tx_queue || json[0]!='{') return false;
     outbound_t m={.queued_at=esp_timer_get_time(),.wait_for_transport=reliable};
     if(!strcmp(topic,SC_BASE "telemetry")) m.kind="telemetry";
-    else if(!strcmp(topic,SC_BASE "logs")) m.kind="log";
+    else if(!strcmp(topic,SC_BASE "logs")) m.kind="logs";
     else if(!strcmp(topic,SC_BASE "heartbeat")) m.kind="heartbeat";
     else if(!strcmp(topic,SC_BASE "status")) m.kind="status";
-    else if(!strcmp(topic,SC_BASE "ota/status")) m.kind="ota_status";
+    else if(!strcmp(topic,SC_BASE "ota/status")) m.kind="ota";
     else return false;
     m.state_changing=reliable;
 
@@ -113,10 +120,10 @@ bool sc_publish(const char *topic,const char *json,bool reliable)
         if(last==UINT32_MAX) return false;
     } while(!atomic_compare_exchange_weak(&tx_sequence,&last,last+1));
     uint32_t seq=last+1;
-    snprintf(m.id,sizeof(m.id),"%08"PRIx32"%08"PRIx32"-%08"PRIx32,nonce[0],nonce[1],seq);
+    snprintf(m.id,sizeof(m.id),"%08"PRIx32"-%08"PRIx32,nonce[0],seq);
     int n=snprintf(m.json,sizeof(m.json),"{\"protocol_version\":2,\"message_id\":\"%s\","
-        "\"message_type\":\"%s\",\"uptime_ms\":%"PRId64",%s",
-        m.id,m.kind,m.queued_at/1000,json+1);
+        "\"message_type\":\"%s\",\"uptime_ms\":%"PRId64",\"logical_device\":\"%s\",%s",
+        m.id,m.kind,m.queued_at/1000,sc_logical_device(),json+1);
     if(n<0 || n>=sizeof(m.json)) {
         ESP_LOGW("TX","FAILED_PAYLOAD_TOO_LARGE id=%s type=%s",m.id,m.kind);
         return false;
@@ -129,7 +136,7 @@ bool sc_publish(const char *topic,const char *json,bool reliable)
         ESP_LOGW("TX","FAILED_QUEUE_FULL id=%s topic=%s",m.id,m.topic);
         return false;
     }
-    ESP_LOGI("TX","QUEUED id=%s device=%s type=%s topic=%s%s",
+    if(sc_serial_debug()) ESP_LOGI("TX","QUEUED id=%s device=%s type=%s topic=%s%s",
              m.id,sc_config.device,m.kind,m.topic,sc_network_ready()?"":" offline");
     return true;
 }
@@ -191,7 +198,8 @@ static void receive_ack(esp_mqtt_event_handle_t e)
     bool failed=cJSON_IsString(status) && !strcmp(status->valuestring,"FAILED");
     if(cJSON_IsString(device) && !strcmp(device->valuestring,sc_config.device) &&
        cJSON_IsString(id) && strlen(id->valuestring)==SC_ACK_ID_LEN-1 &&
-       strspn(id->valuestring,"0123456789abcdef-")==SC_ACK_ID_LEN-1 &&
+       id->valuestring[8]=='-' && strspn(id->valuestring,"0123456789abcdef")==8 &&
+       strspn(id->valuestring+9,"0123456789abcdef")==8 &&
        cJSON_IsString(kind) && strlen(kind->valuestring)<sizeof(((ack_event_t *)0)->kind) &&
        cJSON_IsNumber(version) && version->valuedouble==2 && cJSON_IsBool(retry) &&
        cJSON_IsString(timestamp) && strlen(timestamp->valuestring)>=20 && strlen(timestamp->valuestring)<=32 &&
@@ -234,7 +242,8 @@ static void mqtt_event(void *arg,esp_event_base_t base,int32_t id,void *data)
     } else if(id==MQTT_EVENT_CONNECTED) {
         if(esp_mqtt_client_subscribe(client,ack_topic,1)<0)
             ESP_LOGW("MQTT","ACK subscribe failed topic=%s",ack_topic);
-        ESP_LOGI("MQTT","CONNECTED ACK topic=%s",ack_topic);
+        if(sc_serial_debug()) ESP_LOGI("MQTT","CONNECTED ACK topic=%s",ack_topic);
+        else ESP_LOGI("MQTT","CONNECTED");
         xEventGroupSetBits(network,MQTT_UP);
 #ifndef SC_RECOVERY
         if(sc_ota_enabled() && esp_mqtt_client_subscribe(client,SC_BASE "orders",1)<0)
@@ -263,7 +272,7 @@ static void mqtt_event(void *arg,esp_event_base_t base,int32_t id,void *data)
 #endif
             incoming_valid=supported && !e->retain && incoming_total>0 &&
                 incoming_total<sizeof(incoming);
-            if(incoming_valid)
+            if(incoming_valid && sc_serial_debug())
                 ESP_LOGI("RX","topic=%s bytes=%d (control payload omitted)",
                          incoming_ota?SC_BASE "ota/command":SC_BASE "orders",incoming_total);
         }
@@ -313,6 +322,64 @@ static void report_wifi_events(void)
         sc_log("INFO","WIFI_CONNECTED","Wi-Fi obtained IP address");
     }
 }
+static void local_stamp(char *out,size_t capacity)
+{
+    time_t clock_now=time(NULL);
+    if(clock_now>1735689600) {
+        struct tm local;
+        clock_now+=7*60*60;
+        if(gmtime_r(&clock_now,&local) && strftime(out,capacity,"%H:%M:%S",&local)) return;
+    }
+    snprintf(out,capacity,"+%"PRId64"s",esp_timer_get_time()/1000000);
+}
+static unsigned short_id(const char *id)
+{
+    return (unsigned)((uint32_t)strtoul(id+9,NULL,16)-(nonce[1]&0x7fffffffU))%1000;
+}
+static double own_number(const char *json,const char *key)
+{
+    const char *value=strstr(json,key);
+    return value?strtod(value+strlen(key),NULL):0;
+}
+static void serial_tx(const pending_t *p)
+{
+    if(sc_serial_debug()) {
+        ESP_LOGI("TX","id=%s topic=%s retry=%u JSON %s",p->message.id,
+                 p->message.topic,p->attempts,p->message.json);
+        return;
+    }
+    char stamp[24];
+    local_stamp(stamp,sizeof(stamp));
+    unsigned seq=short_id(p->message.id);
+    if(p->attempts) {
+        ESP_LOGI("TX","[%s] #%03u | RETRY %u/3",stamp,seq,p->attempts);
+    } else if(!strcmp(p->message.kind,"heartbeat")) {
+        ESP_LOGI("TX","[%s] HB #%03u | RAM=%u KiB | RSSI=%d",stamp,seq,
+                 (unsigned)own_number(p->message.json,"\"free_heap\":")/1024,
+                 (int)own_number(p->message.json,"\"rssi\":"));
+    } else if(!strcmp(p->message.kind,"telemetry")) {
+        const char *json=p->message.json;
+        ESP_LOGI("TX","[%s] DATA #%03u | %.1fV | %.2fA | %.1fW | %.2fWh",stamp,seq,
+                 own_number(json,"\"voltage_v\":"),own_number(json,"\"current_a\":"),
+                 own_number(json,"\"power_w\":"),own_number(json,"\"energy_total_wh\":"));
+    } else {
+        ESP_LOGI("TX","[%s] #%03u | %s",stamp,seq,p->message.kind);
+    }
+}
+static void serial_ack(const pending_t *p,const ack_event_t *a,int64_t now)
+{
+    int64_t elapsed=(now-p->sent_at)/1000;
+    if(sc_serial_debug() || !a->success) {
+        ESP_LOG_LEVEL(a->success?ESP_LOG_INFO:ESP_LOG_WARN,"ACK",
+            "SERVER_%s id=%s type=%s rtt_ms=%"PRId64" retries=%u error=%s retryable=%d",
+            a->success?"SUCCESS":"FAILED",a->id,a->kind,elapsed,p->attempts-1,
+            a->error[0]?a->error:"none",a->retryable);
+    } else {
+        char stamp[24];
+        local_stamp(stamp,sizeof(stamp));
+        ESP_LOGI("ACK","[%s] #%03u | SUCCESS | %"PRId64"ms",stamp,short_id(a->id),elapsed);
+    }
+}
 static void transport_settled(pending_t *p)
 {
     if(!p->transport_done && p->message.wait_for_transport) atomic_fetch_sub(&transport_wait,1);
@@ -329,13 +396,13 @@ static void handle_ack_event(const ack_event_t *a,int64_t now)
         pending_t *p=&pending[i];
         if(!p->active || !p->attempts) continue;
         if(a->from_server) {
+            if(!strcmp(p->message.kind,"ota")) continue;
             if(strcmp(a->id,p->message.id) || strcmp(a->kind,p->message.kind)) continue;
             if(p->server_terminal || (!a->success && a->retryable && p->retry_requested)) return;
             server_v2_seen=true;
-            ESP_LOG_LEVEL(a->success?ESP_LOG_INFO:ESP_LOG_WARN,"ACK",
-                "SERVER_%s id=%s topic=%s type=%s rtt_ms=%"PRId64" retries=%u error=%s retryable=%d",
-                a->success?"SUCCESS":"FAILED",a->id,ack_topic,a->kind,(now-p->sent_at)/1000,
-                p->attempts-1,a->error[0]?a->error:"none",a->retryable);
+            if(a->success) stats_ok++;
+            else if(!a->retryable) stats_fail++;
+            serial_ack(p,a,now);
             if(a->success || !a->retryable) {
                 p->server_terminal=true;
                 if(p->broker_ack) finish_pending(p);
@@ -348,9 +415,11 @@ static void handle_ack_event(const ack_event_t *a,int64_t now)
         if(p->packet!=a->packet || p->broker_ack) continue;
         p->broker_ack=true;
         transport_settled(p);
-        ESP_LOGI("ACK","BROKER_ACK id=%s packet=%d rtt_ms=%"PRId64" retries=%u",
+        bool ota_status=!strcmp(p->message.kind,"ota");
+        if(sc_serial_debug() || ota_status) ESP_LOGI("ACK","BROKER_ACK id=%s packet=%d rtt_ms=%"PRId64" retries=%u",
                  p->message.id,a->packet,(now-p->sent_at)/1000,p->attempts-1);
-        if(p->server_terminal) finish_pending(p);
+        /* Django's OTA status path uses its existing state machine and sends no v2 ACK. */
+        if(p->server_terminal || ota_status) finish_pending(p);
         return;
     }
     if(a->from_server) ESP_LOGD("ACK","Ignored late, duplicate or unmatched server ACK");
@@ -376,16 +445,18 @@ static void service_pending(int64_t now)
         }
         /* Legacy Web has no receipt deduplication for DONE / OTA state. Only
          * a private authenticated peer that answered v2 can receive retries. */
-        bool can_retry=!p->message.state_changing ||
-            (server_v2_seen && !sc_config.mqtt_public_signed_mode);
+        bool can_retry=strcmp(p->message.kind,"ota") &&
+            (!p->message.state_changing || (server_v2_seen && !sc_config.mqtt_public_signed_mode));
         if(p->attempts>=SC_ACK_MAX_ATTEMPTS || (p->attempts && !can_retry) ||
            now-p->message.queued_at>=SC_ACK_LIFETIME_US) {
             ESP_LOGW("ACK","%s id=%s attempts=%u broker_ack=%d online=%d reason=%s",
-                p->attempts?"FAILED_NO_ACK":"FAILED_NOT_SENT",p->message.id,
+                !p->attempts?"FAILED_NOT_SENT":!strcmp(p->message.kind,"ota")?"FAILED_NO_PUBACK":"FAILED_NO_ACK",
+                p->message.id,
                 p->attempts,p->broker_ack,sc_network_ready(),
                 p->attempts && !can_retry?"peer_not_confirmed_v2":
                 p->attempts>=SC_ACK_MAX_ATTEMPTS?"retry_limit":"queue_lifetime");
             atomic_fetch_add(&dropped,1);
+            stats_fail++;
             finish_pending(p);
             continue;
         }
@@ -396,34 +467,36 @@ static void service_pending(int64_t now)
             p->due=now+2000000;
             continue;
         }
-        ESP_LOGI("TX","id=%s topic=%s retry=%u JSON %s",p->message.id,
-                 p->message.topic,p->attempts,p->message.json);
         int packet=esp_mqtt_client_enqueue(client,p->message.topic,p->message.json,0,1,0,true);
         if(packet<=0) {
             ESP_LOGW("TX","FAILED_MQTT_ENQUEUE id=%s code=%d",p->message.id,packet);
             p->due=now+2000000;
             continue;
         }
+        serial_tx(p);
+        stats_tx++;
+        if(p->attempts) stats_retry++;
         p->packet=packet;
         p->broker_ack=p->retry_requested=false;
         p->attempts++;
         p->sent_at=now;
         p->due=now+SC_ACK_TIMEOUT_US;
-        ESP_LOGI("TX","PUBLISH_SUBMITTED id=%s packet=%d retries=%u (MQTT outbox)",
+        if(sc_serial_debug()) ESP_LOGI("TX","PUBLISH_SUBMITTED id=%s packet=%d retries=%u (MQTT outbox)",
                  p->message.id,packet,p->attempts-1);
     }
 }
 static void heartbeat(void)
 {
+#ifdef SC_RECOVERY
+    /* Recovery reports OTA progress; its version is not Main's version. */
+    return;
+#endif
     if(!sc_network_ready()) return;
     wifi_ap_record_t ap;
     int rssi=esp_wifi_sta_get_ap_info(&ap)==ESP_OK?ap.rssi:0;
     unsigned h=atomic_load(&health);
     const char *mode=headless?"HEADLESS":"NORMAL";
-#ifdef SC_RECOVERY
-    mode="RECOVERY";
-#endif
-    bool disabled=headless || !strcmp(mode,"RECOVERY");
+    bool disabled=headless;
     char json[512];
     snprintf(json,sizeof(json),"{\"device\":\"%s\",\"firmware_version\":\"%.31s\","
         "\"free_heap\":%u,\"min_free_heap\":%u,\"rssi\":%d,\"mqtt_connected\":true,"
@@ -438,10 +511,52 @@ static void heartbeat(void)
         sc_dropped_messages(),esp_reset_reason(),mode);
     sc_publish(SC_BASE "heartbeat",json,false);
 }
+static void serial_commands(void)
+{
+    if(!serial_rx_ready) return;
+    static char command[24];
+    static unsigned length;
+    static bool overflow;
+    uint8_t input[32];
+    int count=uart_read_bytes(UART_NUM_0,input,sizeof(input),0);
+    for(int i=0;i<count;i++) {
+        if(input[i]!='\r' && input[i]!='\n') {
+            if(length<sizeof(command)-1 && input[i]>=32 && input[i]<=126 && !overflow)
+                command[length++]=(char)input[i];
+            else overflow=true;
+            continue;
+        }
+        if(overflow) {
+            length=0;
+            overflow=false;
+            ESP_LOGW("USB","Invalid command. Use HELP.");
+            continue;
+        }
+        if(!length) continue;
+        command[length]=0;
+        length=0;
+        serial_mode_t mode=SERIAL_NORMAL;
+        if(!strcmp(command,"LOG DEBUG")) mode=SERIAL_DEBUG;
+        else if(!strcmp(command,"LOG ERROR")) mode=SERIAL_ERROR;
+        else if(strcmp(command,"LOG NORMAL")) {
+            if(!strcmp(command,"HELP")) ESP_LOGW("USB","LOG NORMAL | LOG DEBUG | LOG ERROR | STATUS | HELP");
+            else if(!strcmp(command,"STATUS")) {
+                ESP_LOGW("USB","device=%s mode=%u mqtt=%d queue=%u dropped=%"PRIu32,
+                         sc_logical_device(),atomic_load(&serial_mode),sc_network_ready(),
+                         (unsigned)uxQueueMessagesWaiting(tx_queue),sc_dropped_messages());
+            } else ESP_LOGW("USB","Unknown command. Use HELP.");
+            continue;
+        }
+        atomic_store(&serial_mode,mode);
+        esp_log_level_set("*",mode==SERIAL_ERROR?ESP_LOG_WARN:ESP_LOG_INFO);
+        if(mode==SERIAL_NORMAL) esp_log_level_set("wifi",ESP_LOG_WARN);
+        ESP_LOGW("USB","%s",command);
+    }
+}
 static void network_worker(void *arg)
 {
     bool mqtt_started=false;
-    int64_t last_diag=0,next_start=0;
+    int64_t last_diag=0,last_summary=0,next_start=0;
     while(1) {
         /* TLS certificate validity checks need wall time; SNTP supplies time, not OTA authority. */
         int64_t now=esp_timer_get_time();
@@ -451,13 +566,20 @@ static void network_worker(void *arg)
             next_start=now+5000000;
             if(!mqtt_started) sc_log("WARN","MQTT_ERROR","Failed to start MQTT task");
         }
+        serial_commands();
         report_wifi_events();
         service_pending(now);
         if(now-last_diag>=10000000LL) {
-            sc_memory_log();
-            ESP_LOGI("TELEMETRY","Heartbeat tick mqtt=%s",sc_network_ready()?"connected":"disconnected");
+            if(sc_serial_debug()) sc_memory_log();
             heartbeat();
             last_diag=now;
+        }
+        if(now-last_summary>=60000000LL) {
+            unsigned caps=MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT;
+            ESP_LOGI("MEM","TX=%u SUCCESS=%u FAILED=%u RETRY=%u DROPPED=%"PRIu32" FREE_HEAP=%u MIN_HEAP=%u",
+                     stats_tx,stats_ok,stats_fail,stats_retry,sc_dropped_messages(),
+                     (unsigned)heap_caps_get_free_size(caps),(unsigned)heap_caps_get_minimum_free_size(caps));
+            last_summary=now;
         }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
@@ -515,12 +637,17 @@ void sc_network_start(void (*cb)(bool))
         .network.timeout_ms=5000, .network.reconnect_timeout_ms=5000,
     };
     esp_fill_random(nonce,sizeof(nonce));
-    ESP_LOGI("BOOT","device=%s firmware=%.31s reset=%d mode=%s",sc_config.device,
-             esp_app_get_description()->version,esp_reset_reason(),headless?"HEADLESS":"NORMAL");
+    atomic_store(&tx_sequence,nonce[1]&0x7fffffffU);
+    esp_log_level_set("wifi",ESP_LOG_WARN);
+    serial_rx_ready=uart_driver_install(UART_NUM_0,256,0,0,NULL,0)==ESP_OK;
+    if(!serial_rx_ready) ESP_LOGW("USB","Serial command input unavailable");
+    ESP_LOGI("BOOT","%s | FW %.31s | %s | reset=%d",sc_logical_device(),
+             esp_app_get_description()->version,headless?"HEADLESS":"NORMAL",esp_reset_reason());
+    if(sc_config.mqtt_public_test_mode) ESP_LOGI("BOOT","MQTT test alias=%s",sc_config.device);
     client=esp_mqtt_client_init(&mqtt);
     ESP_ERROR_CHECK(client?ESP_OK:ESP_ERR_NO_MEM);
     ESP_ERROR_CHECK(esp_mqtt_client_register_event(client,ESP_EVENT_ANY_ID,mqtt_event,NULL));
-    ESP_ERROR_CHECK(xTaskCreate(network_worker,"sc_network",4096,NULL,3,NULL)==pdPASS?ESP_OK:ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(xTaskCreate(network_worker,"sc_network",5120,NULL,3,NULL)==pdPASS?ESP_OK:ESP_ERR_NO_MEM);
     ESP_ERROR_CHECK(esp_wifi_start());
     sc_log("INFO","BOOT","Application started");
     sc_log("INFO","RELAY_OFF","Relay OFF at startup");

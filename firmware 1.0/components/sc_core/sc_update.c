@@ -175,8 +175,9 @@ esp_err_t sc_install(const sc_request_t *r)
     esp_ota_handle_t ota=0;
     mbedtls_sha256_context sha; mbedtls_sha256_init(&sha);
     err=mbedtls_sha256_starts(&sha,0)==0?ESP_OK:ESP_FAIL;
-    int received=0,progress=-1;
+    int received=0,progress=-1,next_milestone=25;
     sc_status(r,"DOWNLOADING",0); sc_log("INFO","OTA_DOWNLOADING","Streaming authenticated firmware");
+    ESP_LOGI("OTA","Firmware download 0%%");
     int64_t deadline=esp_timer_get_time()+600000000LL;
     while(err==ESP_OK && received<m.size) {
         if(esp_timer_get_time()>deadline) { err=ESP_ERR_TIMEOUT; break; }
@@ -207,12 +208,14 @@ esp_err_t sc_install(const sc_request_t *r)
         int p=(received*100/m.size)/10*10;
         if(p!=progress) {
             sc_status(r,"DOWNLOADING",p);
-            if(p/25>progress/25) {
-                char message[48];
-                snprintf(message,sizeof(message),"Firmware download %d%%",p);
-                sc_log("INFO","OTA_PROGRESS",message);
-            }
             progress=p;
+        }
+        if(received*100/m.size>=next_milestone) {
+            char message[48];
+            snprintf(message,sizeof(message),"Firmware download %d%%",next_milestone);
+            ESP_LOGI("OTA","%s",message);
+            sc_log("INFO","OTA_PROGRESS",message);
+            next_milestone+=25;
         }
     }
     unsigned char digest[32]={0}; char hex[65];

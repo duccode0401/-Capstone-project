@@ -23,6 +23,11 @@
 #endif
 
 sc_config_t sc_config;
+static char logical_device[32];
+const char *sc_logical_device(void)
+{
+    return sc_config.mqtt_public_test_mode?logical_device:sc_config.device;
+}
 _Static_assert(sizeof(sc_request_t)==584,"Persisted NVS request V1 ABI changed; immutable Recovery needs compatibility");
 static nvs_handle_t store;
 static bool storage_ready;
@@ -216,8 +221,12 @@ esp_err_t sc_init(void)
              field(j,"mqtt_password",sc_config.mqtt_password,sizeof(sc_config.mqtt_password)))) &&
            field(j,"key_hex",sc_config.key_hex,sizeof(sc_config.key_hex)) && sc_ota_enabled();
     } else if(ok) {
+        strcpy(logical_device,"ESP32_001");
+        const cJSON *logic=cJSON_GetObjectItemCaseSensitive(j,"logical_device");
+        bool logical_valid=!logic ||
+            (field(j,"logical_device",logical_device,sizeof(logical_device)) && token(logical_device));
         const char *alias=sc_config.device;
-        ok=!strcmp(sc_config.broker,SC_PUBLIC_TEST_BROKER) && sc_trusted_url(sc_config.trust_base) &&
+        ok=logical_valid && !strcmp(sc_config.broker,SC_PUBLIC_TEST_BROKER) && sc_trusted_url(sc_config.trust_base) &&
            strlen(alias)==24 && !strncmp(alias,"SC_TEST_",8) &&
            strspn(alias+8,"0123456789abcdef")==16;
     }
@@ -393,7 +402,7 @@ void sc_memory_log(void)
 {
     unsigned caps=MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT;
     unsigned free=heap_caps_get_free_size(caps);
-    ESP_LOGI("MEM","RAM internal: free=%u B, minimum=%u B, largest block=%u B, task=%s stack_watermark=%u B dropped=%"PRIu32,
+    if(sc_serial_debug()) ESP_LOGI("MEM","RAM internal: free=%u B, minimum=%u B, largest block=%u B, task=%s stack_watermark=%u B dropped=%"PRIu32,
         free,(unsigned)heap_caps_get_minimum_free_size(caps),(unsigned)heap_caps_get_largest_free_block(caps),
         pcTaskGetName(NULL),(unsigned)uxTaskGetStackHighWaterMark(NULL),sc_dropped_messages());
     if(free<20000 || heap_caps_get_largest_free_block(caps)<8192)
